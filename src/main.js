@@ -5,7 +5,7 @@ import { svg2pdf } from "svg2pdf.js";
 import { initOCC, R } from "./occ.js";
 import { Viewer } from "./viewer.js";
 import { Sketcher, newId, entPoints } from "./sketcher.js";
-import { rebuild, featureLabel, prepareImports, importCache, massProps, exportCompound, HOLE_STD, resolvePlane, findFace, findEdge } from "./cad.js";
+import { flatHoles, rebuild, featureLabel, prepareImports, importCache, massProps, exportCompound, HOLE_STD, resolvePlane, findFace, findEdge } from "./cad.js";
 import { STD_PLANES, makeEval, v3, v2, planeFromNormal, planeY, to3D, to2D, circleFrom3 } from "./geom.js";
 import { PROFILE_FAMILIES, profileName } from "./profiles.js";
 import { icon } from "./icons.js";
@@ -696,7 +696,7 @@ function startFeature(type, extra = {}) {
     part: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, count: 1, px: 0, py: 0, pz: 0, merge: false, color: "#c9a24a" },
     loft: { sketches: [], op: "add", ruled: false },
     sweep: { profile: "", path: "", op: "add" },
-    weld: { sketch: defaultSketch(idx), family: "tube_carre", size: "40x40x2", corner: "miter", rot: 0, align: "center", offX: 0, offY: 0, trimT: true, color: "#8f9ba8" },
+    weld: { sketch: defaultSketch(idx), family: "tube_carre", size: "40x40x2", corner: "miter", rot: 0, align: "center", offX: 0, offY: 0, trimT: true, caps: false, capT: 3, color: "#8f9ba8" },
     sheet: { sketch: defaultSketch(idx), thickness: 2, radius: 2, k: 0.4, width: 100, side: "mid", mid: false, reverse: false },
   }[type] || {};
   Object.assign(f, JSON.parse(JSON.stringify(D)));
@@ -781,7 +781,7 @@ function pmSpec(f) {
       const fam = PROFILE_FAMILIES[f.family];
       G.push({ t: "Profilé", f: [{ k: "sketch", l: "Esquisse (lignes)", type: "select", o: sks }, { k: "family", l: "Type", type: "select", o: Object.entries(PROFILE_FAMILIES).map(([k, v]) => [k, v.label]) }, { k: "size", l: "Taille", type: "select", o: fam.sizes.map(s => [s, s]) }, { k: "rot", l: "Rotation du profil (°)", type: "num" }] });
       G.push({ t: "Position du profil", f: [{ k: "align", l: "Ligne d'esquisse sur", type: "select", o: [["center", "Centre du profil"], ["top", "Face du dessus"], ["bottom", "Face du dessous"], ["left", "Face gauche"], ["right", "Face droite"]] }, { k: "offX", l: "Décalage X (mm)", type: "num" }, { k: "offY", l: "Décalage Y (mm)", type: "num" }] });
-      G.push({ t: "Coins et jonctions", f: [{ k: "corner", l: "Coins (2 barres)", type: "select", o: [["miter", "Coupe d'onglet"], ["none", "Bout à bout (sans coupe)"]] }, { k: "trimT", l: "Ajuster les jonctions en T contre la barre", type: "check" }, { k: "color", l: "Couleur", type: "color" }] });
+      G.push({ t: "Coins et jonctions", f: [{ k: "corner", l: "Coins (2 barres)", type: "select", o: [["miter", "Coupe d'onglet"], ["none", "Bout à bout (sans coupe)"]] }, { k: "trimT", l: "Ajuster les jonctions en T contre la barre", type: "check" }, ...(/^tube_/.test(f.family) ? [{ k: "caps", l: "Embouts soudés aux extrémités libres", type: "check" }, ...(f.caps ? [{ k: "capT", l: "Épaisseur des embouts (mm)", type: "num" }] : [])] : []), { k: "color", l: "Couleur", type: "color" }] });
       G.push({ t: "", f: [{ type: "info", html: "Chaque ligne de l'esquisse devient une barre. Pour une ossature 3D (pergola…), faites une esquisse par plan : poteaux sur le plan de face, traverses sur un plan décalé, etc." }] });
       break;
     }
@@ -1082,10 +1082,11 @@ function showFlat(id) {
   const f = doc.features.find(q => q.id === id); const I = st.info[id];
   if (!I) return toast("La tôle pliée est en erreur", true);
   const L = I.flat, W = I.width, pad = 20;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${-pad} ${-pad - 14} ${L + 2 * pad} ${W + 2 * pad + 14}" style="width:100%;max-height:50vh;background:#fff"><rect x="0" y="0" width="${L}" height="${W}" fill="#e9eef3" stroke="#000" stroke-width="${Math.max(L, W) / 500}"/>${I.bends.map((b, i) => `<line x1="${b.pos}" y1="0" x2="${b.pos}" y2="${W}" stroke="#d93025" stroke-dasharray="${W / 40} ${W / 60}" stroke-width="${Math.max(L, W) / 600}"/><text x="${b.pos}" y="${-4}" font-size="${Math.max(L, W) / 45}" text-anchor="middle" fill="#d93025">P${i + 1}</text>`).join("")}</svg>`;
+  const holes = flatHoles(doc, st, id);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${-pad} ${-pad - 14} ${L + 2 * pad} ${W + 2 * pad + 14}" style="width:100%;max-height:50vh;background:#fff"><rect x="0" y="0" width="${L}" height="${W}" fill="#e9eef3" stroke="#000" stroke-width="${Math.max(L, W) / 500}"/>${holes.map(hh => `<circle cx="${hh.x}" cy="${hh.y}" r="${hh.d / 2}" fill="#fff" stroke="#000" stroke-width="${Math.max(L, W) / 500}"/>`).join("")}${I.bends.map((b, i) => `<line x1="${b.pos}" y1="0" x2="${b.pos}" y2="${W}" stroke="#d93025" stroke-dasharray="${W / 40} ${W / 60}" stroke-width="${Math.max(L, W) / 600}"/><text x="${b.pos}" y="${-4}" font-size="${Math.max(L, W) / 45}" text-anchor="middle" fill="#d93025">P${i + 1}</text>`).join("")}</svg>`;
   let h = svg + `<table class="tb" style="margin-top:10px"><tr><th>Développé</th><td><b>${fmt(L, 2)} × ${fmt(W, 1)} mm</b></td><th>Épaisseur</th><td>${fmt(I.t, 2)} mm</td></tr><tr><th>Rayon intérieur</th><td>${fmt(I.r, 2)} mm</td><th>Facteur K</th><td>${fmt(I.K, 3)}</td></tr></table>
-  <table class="tb" style="margin-top:8px"><tr><th>Pli</th><th>Angle</th><th>Sens</th><th>Position axe de pli (mm)</th><th>Zone de pli</th></tr>${I.bends.map((b, i) => `<tr><td>P${i + 1}</td><td>${fmt(b.angle, 1)}°</td><td>${b.dir}</td><td class="n">${fmt(b.pos, 2)}</td><td class="n">${fmt(b.start, 2)} → ${fmt(b.end, 2)}</td></tr>`).join("")}</table>`;
-  modal("Mise à plat – " + esc(f.name), h, [{ label: "Exporter DXF (découpe)", pri: true, click: () => { saveZipped(`${doc.name} - ${f.name} - developpe.zip`, { [`${f.name}-developpe.dxf`]: flatPatternDXF(I, f.name) }, toast); return false; } }, { label: "Fermer" }], { wide: true });
+  ${holes.length ? `<p class="hint">${holes.length} perçage(s) reporté(s) sur le développé : ${holes.map(hh => `Ø${fmt(hh.d, 2)} à (${fmt(hh.x, 1)} ; ${fmt(hh.y, 1)})`).join(", ")}</p>` : `<p class="hint">Les perçages faits avec « Assistance perçage » sur la tôle sont reportés automatiquement sur le développé.</p>`}<table class="tb" style="margin-top:8px"><tr><th>Pli</th><th>Angle</th><th>Sens</th><th>Position axe de pli (mm)</th><th>Zone de pli</th></tr>${I.bends.map((b, i) => `<tr><td>P${i + 1}</td><td>${fmt(b.angle, 1)}°</td><td>${b.dir}</td><td class="n">${fmt(b.pos, 2)}</td><td class="n">${fmt(b.start, 2)} → ${fmt(b.end, 2)}</td></tr>`).join("")}</table>`;
+  modal("Mise à plat – " + esc(f.name), h, [{ label: "Exporter DXF (découpe)", pri: true, click: () => { saveZipped(`${doc.name} - ${f.name} - developpe.zip`, { [`${f.name}-developpe.dxf`]: flatPatternDXF(I, f.name, holes) }, toast); return false; } }, { label: "Fermer" }], { wide: true });
 }
 function exportSketchDXF(f) { saveZipped(`${doc.name} - ${f.name}.zip`, { [`${f.name}.dxf`]: sketchToDXF(f.entities || []) }, toast); }
 
@@ -1228,7 +1229,7 @@ function showExport() {
       else if (k === "dxfplan" || k === "pdfplan") { m.remove(); showDrawing(); }
       else if (k === "dxfface") { if (!pf) return toast("Sélectionnez d'abord une face plane dans la vue (clic sur la face)", true); saveFile(`${name} - face.dxf`, faceToDXF(pf.face, pf.plane, to2D), toast); }
       else if (k === "dxfsk") { if (!sel) return toast("Sélectionnez d'abord une esquisse dans l'arbre", true); exportSketchDXF(sel); }
-      else if (k === "dxfflat") { const s2 = doc.features.filter(f => f.type === "sheet" && st.info[f.id]); if (!s2.length) return toast("Aucune tôle pliée valide", true); const f = s2.find(x => x.id === treeSel) || s2[s2.length - 1]; saveZipped(`${name} - ${f.name} - developpe.zip`, { [`${f.name}-developpe.dxf`]: flatPatternDXF(st.info[f.id], f.name) }, toast); }
+      else if (k === "dxfflat") { const s2 = doc.features.filter(f => f.type === "sheet" && st.info[f.id]); if (!s2.length) return toast("Aucune tôle pliée valide", true); const f = s2.find(x => x.id === treeSel) || s2[s2.length - 1]; saveZipped(`${name} - ${f.name} - developpe.zip`, { [`${f.name}-developpe.dxf`]: flatPatternDXF(st.info[f.id], f.name, flatHoles(doc, st, f.id)) }, toast); }
       else if (k === "png") saveFile(name + ".png", dataURLtoBlob(viewer.screenshot()), toast);
       else if (k === "json") saveProject();
     } catch (e) { toast("Export impossible : " + (e.message || e), true); }

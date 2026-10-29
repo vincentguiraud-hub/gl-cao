@@ -70,9 +70,10 @@ export function sketchToDXF(entities) {
   }
   return d.toString();
 }
-export function flatPatternDXF(info, name) {
+export function flatPatternDXF(info, name, holes = []) {
   const d = new DXF(); const L = info.flat, W = info.width;
   d.line([0, 0], [L, 0]); d.line([L, 0], [L, W]); d.line([L, W], [0, W]); d.line([0, W], [0, 0]);
+  for (const h of holes) d.circle([Math.round(h.x * 1e4) / 1e4, Math.round(h.y * 1e4) / 1e4], h.d / 2);
   for (const b of info.bends) { d.line([b.pos, 0], [b.pos, W], "PLIAGE"); d.text([b.pos + 2, W + 4], 4, `PLI ${b.dir.toUpperCase()} ${b.angle.toFixed(1)}° R${info.r}`, "TEXTE"); }
   d.text([0, -10], 5, `${name} - Ep ${info.t} - Developpe ${L.toFixed(2)} x ${W}`, "TEXTE");
   return d.toString();

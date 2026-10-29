@@ -87,3 +87,13 @@ for (const [name, features] of Object.entries(more)) {
   console.log((ok ? "OK  " : "ERR ") + name.padEnd(32) + (mp ? `V=${mp.volume.toFixed(0)} corps=${st.bodies.length}` : "") + " " + errs.map(([k, v]) => k + ": " + v).join(" | "));
 }
 console.log("échecs v1.3 :", fails2);
+{
+  const { flatHoles } = await import("../src/cad.js");
+  const feats = [sk("t", front, [L([0, 80], [0, 0]), L([0, 0], [120, 0]), L([120, 0], [120, 25])]), { id: "t1", type: "sheet", sketch: "t", thickness: 3, radius: 3, k: 0.4, width: 100, side: "left", mid: true },
+    { id: "h", type: "hole", face: { p: [60, 0, 0], n: [0, -1, 0] }, points: [[40, 0, 25], [80, 0, -25]], kind: "simple", d: 11, end: "through" }];
+  const doc = { vars: {}, material: { density: 7.85 }, features: feats };
+  const st = rebuild(doc); const fh = flatHoles(doc, st, "t1");
+  console.log((fh.length === 2 ? "OK  " : "ERR ") + "perçages sur développé " + JSON.stringify(fh.map(h => [h.x.toFixed(2), h.y.toFixed(2), h.d])) + " développé=" + st.info.t1.flat.toFixed(2));
+  const w = rebuild({ vars: {}, material: { density: 7.85 }, features: [sk("w", front, [L([0, 0], [500, 0]), L([500, 0], [500, 300])]), { id: "m", type: "weld", sketch: "w", family: "tube_carre", size: "40x40x2", corner: "miter", caps: true, capT: 3 }] });
+  console.log((w.bodies.length === 4 && !Object.keys(w.errors).length ? "OK  " : "ERR ") + "embouts mécano corps=" + w.bodies.length + " " + JSON.stringify(w.errors));
+}

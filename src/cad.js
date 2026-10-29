@@ -209,6 +209,7 @@ export function sheetGeometry(pts0, t, r, K, side) {
   // positions des lignes de pli sur le développé
   const flatBends = []; let acc = 0;
   for (let i = 0; i < straights.length; i++) {
+    straights[i].flat0 = acc;
     acc += straights[i].L;
     const b = bends[i];
     if (i < straights.length - 1 && b) { const ba = b.th * (r + K * t); flatBends.push({ pos: acc + ba / 2, start: acc, end: acc + ba, angle: b.th * 180 / Math.PI, dir: b.s > 0 ? "haut" : "bas" }); acc += ba; }
@@ -303,6 +304,21 @@ function weldMembers(f, sk, ev, st) {
     const name = profileName(f.family, f.size);
     members.push({ shape: solid, name: name + " — " + lengthMax.toFixed(1) + " mm", kind: "weld", feature: f.id, color: f.color || "#9aa7b4" });
     info.push({ profile: name, length: lengthMax, cuts: ends.map(e => e.cut), mass: sec0.area * lengthMax * dens / 1e6 });
+    // embouts (bouchons) soudés sur les extrémités libres des tubes
+    if (f.caps && /^tube_/.test(f.family)) {
+      const ct = ev(f.capT) || 3;
+      for (const [endName, P] of [["A", l.a], ["B", l.b]]) {
+        if (nodes.get(key(P)).length !== 1 || trim[endName]) continue;
+        const out = endName === "A" ? v3.mul(d, -1) : d;
+        const base = v3.add(v3.add(endName === "A" ? A : fr.B, v3.add(v3.mul(xr, offX), v3.mul(yr, offY))), [0, 0, 0]);
+        const cap = (f.family === "tube_rond" ? R.drawCircle(sec0.w / 2) : R.drawRoundedRectangle(sec0.w, sec0.h, Math.min(2 * (parseFloat(String(f.size).split("x")[2]) || 2), sec0.w / 2 - 0.01, sec0.h / 2 - 0.01)));
+        const xc = endName === "A" ? v3.mul(xr, -1) : xr; // garder un repère direct
+        const capSolid = cap.sketchOnPlane(new R.Plane(base, xc, out)).extrude(ct);
+        members.push({ shape: capSolid, name: "Embout ép. " + ct, kind: "weld", feature: f.id, color: f.color || "#9aa7b4" });
+        const ca = f.family === "tube_rond" ? Math.PI * sec0.w * sec0.w / 4 : sec0.w * sec0.h;
+        info.push({ profile: "Embout " + (f.family === "tube_rond" ? "Ø" + sec0.w : sec0.w + "x" + sec0.h) + " ép. " + ct, length: ct, cuts: [], mass: ca * ct * dens / 1e6, cap: true });
+      }
+    }
   });
   return { members, info };
 }
@@ -450,6 +466,7 @@ function applyFeature0(f, st, ev, doc) {
       const depth = f.end === "through" ? big : ev(f.depth);
       let tool = null;
       for (const p of pts) { const t = holeTool(p, hn, h, depth); tool = tool ? tool.fuse(t) : t; }
+      st.info[f.id] = { holes: pts.map(p => [...p]), n: hn, d: h.d };
       applyOp(st, f, tool, "cut");
       break;
     }
@@ -523,7 +540,9 @@ function applyFeature0(f, st, ev, doc) {
       const off = f.mid ? -W / 2 : 0;
       const sh = d.sketchOnPlane(rPlane(offsetPlane(sk.plane, off))).extrude((f.reverse && !f.mid) ? -W : W);
       applyOp(st, f, sh, "add");
-      st.info[f.id] = { flat: g.flat, width: W, bends: g.flatBends, t, r, K };
+      // repère 3D de chaque partie droite (pour reporter les perçages sur le développé)
+      const segs3 = g.straights.map(sg => ({ S: to3D(sk.plane, sg.S), dir: v3.norm(v3.sub(to3D(sk.plane, v2.add(sg.S, sg.dir)), to3D(sk.plane, sg.S))), L: sg.L, flat0: sg.flat0, nrm: v3.norm(v3.sub(to3D(sk.plane, [-sg.dir[1], sg.dir[0]]), to3D(sk.plane, [0, 0]))) }));
+      st.info[f.id] = { flat: g.flat, width: W, bends: g.flatBends, t, r, K, segs3, wOrigin: offsetPlane(sk.plane, off).o, wDir: v3.mul(sk.plane.n, (f.reverse && !f.mid) ? -1 : 1), feature: f.id };
       break;
     }
     case "split": {
@@ -592,6 +611,28 @@ function profileItems(entities) {
   for (const it of items) { it.depth = 0; for (const o of items) if (o !== it && o.area > it.area && pointInPoly(it.poly[0], o.poly)) it.depth++; }
   for (const it of items) it.make = () => it.chain ? sketchRegions(it.chain.map(c => c.e)).drawing : sketchRegions([it.e]).drawing;
   return items;
+}
+
+// Perçages reportés sur le développé d'une tôle pliée
+export function flatHoles(doc, st, sheetId) {
+  const I = st.info[sheetId]; if (!I?.segs3) return [];
+  const idx = doc.features.findIndex(f => f.id === sheetId);
+  const out = [];
+  for (const f of doc.features.slice(idx + 1)) {
+    if (f.type !== "hole" || f.suppressed || st.errors[f.id] || !st.info[f.id]?.holes) continue;
+    const H = st.info[f.id];
+    for (const P of H.holes) {
+      for (const sg of I.segs3) {
+        if (Math.abs(v3.dot(v3.norm(H.n), sg.nrm)) < 0.99) continue; // perçage perpendiculaire à cette partie
+        const v = v3.sub(P, sg.S); const along = v3.dot(v, sg.dir), thick = v3.dot(v, sg.nrm);
+        if (along < -1e-6 || along > sg.L + 1e-6 || Math.abs(thick) > I.t + 1e-3) continue;
+        const w = v3.dot(v3.sub(P, I.wOrigin), I.wDir);
+        if (w < -1e-6 || w > I.width + 1e-6) continue;
+        out.push({ x: sg.flat0 + along, y: w, d: H.d }); break;
+      }
+    }
+  }
+  return out;
 }
 
 // Propriétés de masse

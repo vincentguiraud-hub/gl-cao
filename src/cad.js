@@ -217,19 +217,25 @@ function weldMembers(f, sk, ev, st) {
   const nodes = new Map();
   lines.forEach((l, i) => { for (const p of [l.a, l.b]) { const k = key(p); if (!nodes.has(k)) nodes.set(k, []); nodes.get(k).push(i); } });
   const rot = (ev(f.rot) || 0) * Math.PI / 180;
-  const members = [];
-  const info = [];
-  const dens = st.density;
-  lines.forEach((l, i) => {
+  // position du profil par rapport à la ligne d'esquisse
+  const AL = { center: [0, 0], top: [0, -1], bottom: [0, 1], left: [1, 0], right: [-1, 0] }[f.align || "center"] || [0, 0];
+  const offX = AL[0] * sec0.w / 2 + (ev(f.offX) || 0), offY = AL[1] * sec0.h / 2 + (ev(f.offY) || 0);
+  const frames = lines.map(l => {
     const A = P3(l.a), B = P3(l.b);
-    const d = v3.norm(v3.sub(B, A)); const L = v3.dist(A, B);
-    let x = v3.norm(v3.cross(ns, d)); let y = v3.cross(d, x);
-    // rotation du profil autour de son axe
+    const d = v3.norm(v3.sub(B, A));
+    const x = v3.norm(v3.cross(ns, d)), y = v3.cross(d, x);
     const xr = v3.add(v3.mul(x, Math.cos(rot)), v3.mul(y, Math.sin(rot)));
     const yr = v3.cross(d, xr);
+    return { A, B, d, xr, yr, L: v3.dist(A, B) };
+  });
+  const extentAlong = (fr, dir) => (Math.abs(v3.dot(dir, fr.xr)) * sec0.w + Math.abs(v3.dot(dir, fr.yr)) * sec0.h) / 2;
+  const members = [], info = [];
+  const dens = st.density;
+  lines.forEach((l, i) => {
+    const fr = frames[i]; const { A, d, xr, yr, L } = fr;
     const ends = [];
-    let ext = Math.max(sec0.w, sec0.h) * 2;
-    const extOf = { A: 0, B: 0 };
+    const ext = Math.max(sec0.w, sec0.h) * 2;
+    const extOf = { A: 0, B: 0 }, trim = { A: 0, B: 0 };
     for (const [endName, P, other] of [["A", l.a, l.b], ["B", l.b, l.a]]) {
       const lst = nodes.get(key(P));
       if (f.corner === "miter" && lst.length === 2) {
@@ -240,22 +246,36 @@ function weldMembers(f, sk, ev, st) {
         if (ang > 1e-3 && ang < Math.PI - 1e-3) {
           const m = v3.norm(v3.sub(u, v));
           extOf[endName] = ext;
-          // largeur du profil dans le plan du coin
           const e = v3.norm(v3.cross(v3.cross(u, v), u));
           const half = (Math.abs(v3.dot(e, xr)) * sec0.w + Math.abs(v3.dot(e, yr)) * sec0.h) / 2;
-          ends.push({ P: P3(P), m, extra: half / Math.tan(ang / 2), cut: 90 - ang / 2 * 180 / Math.PI });
+          ends.push({ P: v3.add(P3(P), v3.add(v3.mul(xr, offX), v3.mul(yr, offY))), m, extra: half / Math.tan(ang / 2), cut: 90 - ang / 2 * 180 / Math.PI });
+        }
+        continue;
+      }
+      // jonction en T : l'extrémité tombe au milieu d'une autre barre -> ajuster contre elle
+      if (f.trimT !== false && lst.length === 1) {
+        for (let j = 0; j < lines.length; j++) {
+          if (j === i) continue; const o = lines[j];
+          const ab = v2.sub(o.b, o.a); const t = v2.dot(v2.sub(P, o.a), ab) / v2.dot(ab, ab);
+          if (t <= 1e-6 || t >= 1 - 1e-6) continue;
+          const q = v2.add(o.a, v2.mul(ab, t));
+          if (v2.dist(q, P) > 1e-3) continue;
+          trim[endName] = extentAlong(frames[j], d);
+          break;
         }
       }
     }
-    const origin = v3.sub(A, v3.mul(d, extOf.A));
+    const len = L + extOf.A + extOf.B - trim.A - trim.B;
+    if (len <= 0) throw new Error("Barre trop courte après ajustement");
+    const origin = v3.add(v3.sub(A, v3.mul(d, extOf.A - trim.A)), v3.add(v3.mul(xr, offX), v3.mul(yr, offY)));
     const sec = profileSection(f.family, f.size);
-    let solid = sec.drawing.sketchOnPlane(new R.Plane(origin, xr, d)).extrude(L + extOf.A + extOf.B);
+    let solid = sec.drawing.sketchOnPlane(new R.Plane(origin, xr, d)).extrude(len);
     for (const e of ends) {
-      let px = Math.abs(e.m[1]) < 0.9 ? v3.norm(v3.cross([0, 1, 0], e.m)) : [1, 0, 0];
+      const px = Math.abs(e.m[1]) < 0.9 ? v3.norm(v3.cross([0, 1, 0], e.m)) : [1, 0, 0];
       const res = solid.cutPlane(new R.Plane(e.P, px, e.m), 0, "positive");
       if (res) solid = res;
     }
-    const lengthMax = L + ends.reduce((s, e) => s + e.extra, 0);
+    const lengthMax = L - trim.A - trim.B + ends.reduce((s, e) => s + e.extra, 0);
     const name = profileName(f.family, f.size);
     members.push({ shape: solid, name: name + " — " + lengthMax.toFixed(1) + " mm", kind: "weld", feature: f.id, color: f.color || "#9aa7b4" });
     info.push({ profile: name, length: lengthMax, cuts: ends.map(e => e.cut), mass: sec0.area * lengthMax * dens / 1e6 });
@@ -302,7 +322,16 @@ export function rebuild(doc) {
   return st;
 }
 
+export function isValidShape(sh) {
+  try { const oc = R.getOC(); const a = new oc.BRepCheck_Analyzer(sh.wrapped, true, false); const ok = a.IsValid(); a.delete(); return ok; } catch { return true; }
+}
 function applyFeature(f, st, ev, doc) {
+  const before = st.main;
+  applyFeature0(f, st, ev, doc);
+  if (st.main && st.main !== before && !isValidShape(st.main)) { st.main = before; throw new Error(GEOM_HINT[f.type] || "Résultat géométrique invalide"); }
+  if (st.main && st.main !== before) { try { if (R.measureVolume(st.main) < 1e-6) { st.main = before; throw new Error("Le résultat est vide"); } } catch (e) { if (e.message === "Le résultat est vide") throw e; } }
+}
+function applyFeature0(f, st, ev, doc) {
   switch (f.type) {
     case "plane": {
       let base = resolvePlane(f.base, st);
@@ -320,16 +349,17 @@ function applyFeature(f, st, ev, doc) {
       const op = f.type === "extrude" ? "add" : "cut";
       const sign = (f.reverse ? -1 : 1) * (op === "cut" ? -1 : 1); // enlèvement : vers la matière par défaut
       const big = bigLength(st);
-      let d1 = f.end === "through" ? big : ev(f.depth);
+      const o0 = ev(f.startOffset) || 0;
+      let d1 = (f.end === "through" || f.end === "throughAll2") ? big : ev(f.depth);
       if (!(Math.abs(d1) > 1e-6)) throw new Error("Profondeur nulle");
       let tool;
-      if (f.end === "mid") tool = extrudeTool(sk, -d1 / 2, d1);
-      else if (f.end === "throughAll2") tool = extrudeTool(sk, -big, 2 * big);
+      if (f.end === "mid") tool = extrudeTool(sk, o0 + -d1 / 2, d1);
+      else if (f.end === "throughAll2") tool = extrudeTool(sk, o0 + -big, 2 * big);
       else {
-        tool = extrudeTool(sk, 0, sign * d1);
+        tool = extrudeTool(sk, o0 + 0, sign * d1);
         if (f.dir2) {
           const d2 = f.end2 === "through" ? big : ev(f.depth2);
-          if (d2 > 0) tool = tool.fuse(extrudeTool(sk, 0, -sign * d2));
+          if (d2 > 0) tool = tool.fuse(extrudeTool(sk, o0 + 0, -sign * d2));
         }
       }
       if (f.draft && ev(f.draft) && f.end !== "mid") {
@@ -338,7 +368,7 @@ function applyFeature(f, st, ev, doc) {
         const a = ev(f.draft) * Math.PI / 180;
         const bb = d.boundingBox; const size = Math.max(bb.width, bb.height) / 2;
         const endFactor = Math.max(0.01, (size - Math.abs(d1) * Math.tan(a)) / size);
-        tool = d.sketchOnPlane(rPlane(sk.plane)).extrude(sign * d1, { extrusionProfile: { profile: "linear", endFactor } });
+        tool = d.sketchOnPlane(rPlane(offsetPlane(sk.plane, o0))).extrude(sign * d1, { extrusionProfile: { profile: "linear", endFactor } });
       }
       applyOp(st, f, tool, op);
       if (op === "add" && f.thin) { /* réservé */ }
@@ -500,5 +530,5 @@ export function allShapes(st) { return [st.main, ...st.bodies.map(b => b.shape)]
 export function exportCompound(st) {
   const shapes = allShapes(st);
   if (!shapes.length) return null;
-  return shapes.length === 1 ? shapes[0] : R.makeCompound(shapes);
+  return shapes.length === 1 ? shapes[0].clone() : R.makeCompound(shapes.map(s => s.clone()));
 }

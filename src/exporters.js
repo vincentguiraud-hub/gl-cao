@@ -21,7 +21,9 @@ export async function saveFile(filename, data, toast) {
     }
   }
   const blob = data instanceof Blob ? data : new Blob([data]);
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename;
+  // noms de fichiers sans accents (certains navigateurs ignorent sinon le nom proposé)
+  const safe = filename.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w .()&+-]/g, "_");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = safe;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   return true;
 }

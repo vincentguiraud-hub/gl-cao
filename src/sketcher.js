@@ -126,7 +126,8 @@ export class Sketcher {
     const p = this.raw2D(e); if (!p) return;
     if (this.drag) {
       const np = this.snap(e);
-      movePoint(this.ents, this.drag.from, np, this.drag.e, this.drag.k);
+      if (this.drag.e.g && this.drag.e.gk === "rect") moveRectCorner(this.ents, this.drag.e.g, this.drag.from, np);
+      else movePoint(this.ents, this.drag.from, np, this.drag.e, this.drag.k);
       this.drag.from = [...np];
       this.draw(); return;
     }
@@ -155,7 +156,17 @@ export class Sketcher {
     const t = this.tool;
     if (t === "select" || t === "dim") {
       const p = this.raw2D(e); const h = p && this.hit(p);
-      if (t === "dim") { if (h) this.ui.editDim?.(this, h, e); return; }
+      if (t === "dim") {
+        const ph = p && this.pointHandle(p);
+        const origin = p && v2.dist(p, [0, 0]) < this.px() * 8 ? { e: null, k: null, p: [0, 0] } : null;
+        const pt = ph ? { p: [...ph.e[ph.k]] } : origin;
+        if (pt) {
+          if (this.dimFirst && !v2.eq(this.dimFirst.p, pt.p)) { const a = this.dimFirst; this.dimFirst = null; this.draw(); this.ui.editDistance?.(this, a.p, pt.p, e); return; }
+          this.dimFirst = pt; this.draw(); return;
+        }
+        this.dimFirst = null;
+        if (h) this.ui.editDim?.(this, h, e); return;
+      }
       if (!e.shiftKey && !e.ctrlKey) this.sel.clear();
       if (h) { if (this.sel.has(h.id)) this.sel.delete(h.id); else this.sel.add(h.id); }
       this.draw(); this.ui.onSketchSelect?.(this); return;
@@ -189,6 +200,22 @@ export class Sketcher {
         if (!circleFrom3(tp[0], p, tp[1])) break;
         this.snapshot(); this.add({ t: "arc", a: tp[0], b: tp[1], m: p }); this.temp = []; this.changed(); break;
       }
+      case "carc": {
+        if (tp.length < 2) { if (tp.length === 1 && v2.eq(tp[0], p)) break; tp.push(p); break; }
+        const a = arcCenter(tp[0], tp[1], p); if (!a) break;
+        this.snapshot(); this.add(a); this.temp = []; this.changed(); break;
+      }
+      case "tarc": {
+        if (!tp.length) {
+          const l = this.ents.find(x => x.t === "line" && (v2.eq(x.a, p) || v2.eq(x.b, p)));
+          const ar = this.ents.find(x => x.t === "arc" && (v2.eq(x.a, p) || v2.eq(x.b, p)));
+          if (!l && !ar) { this.ui.toast?.("Commencez l'arc tangent sur l'extrémité d'une ligne ou d'un arc"); break; }
+          this.tanDir = l ? (v2.eq(l.b, p) ? v2.norm(v2.sub(l.b, l.a)) : v2.norm(v2.sub(l.a, l.b))) : arcEndTangent(ar, p);
+          tp.push(p); break;
+        }
+        const a = arcTangent(tp[0], this.tanDir, p); if (!a) break;
+        this.snapshot(); this.add(a); this.temp = []; this.changed(); break;
+      }
       case "poly": {
         if (!tp.length) { tp.push(p); break; }
         const r = v2.dist(tp[0], p); if (r < 1e-6) break;
@@ -213,6 +240,8 @@ export class Sketcher {
       case "crect": this.preview = rectLines([2 * tp[0][0] - c[0], 2 * tp[0][1] - c[1]], c); break;
       case "circle": this.preview = [{ t: "circle", c: tp[0], r: v2.dist(tp[0], c) }]; break;
       case "arc": this.preview = tp.length === 1 ? [{ t: "line", a: tp[0], b: c, cons: true }] : (circleFrom3(tp[0], c, tp[1]) ? [{ t: "arc", a: tp[0], b: tp[1], m: c }] : null); break;
+      case "carc": this.preview = tp.length === 1 ? [{ t: "circle", c: tp[0], r: v2.dist(tp[0], c), cons: true }] : [arcCenter(tp[0], tp[1], c)].filter(Boolean); break;
+      case "tarc": this.preview = [arcTangent(tp[0], this.tanDir, c)].filter(Boolean); break;
       case "poly": this.preview = polyLines(tp[0], v2.dist(tp[0], c), this.polySides, Math.atan2(c[1] - tp[0][1], c[0] - tp[0][0])); break;
       case "slot": this.preview = tp.length === 1 ? [{ t: "line", a: tp[0], b: c, cons: true }] : [{ t: "slot", a: tp[0], b: tp[1], r: distPointLine(c, tp[0], tp[1]) }]; break;
     }
@@ -241,6 +270,8 @@ export class Sketcher {
     for (const e of this.ents) for (const k of handleKeys(e)) ends.push(P(e[k]));
     for (const t of this.temp) ends.push(P(t));
     if (ends.length) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints(ends), new THREE.PointsMaterial({ color: 0x1f2937, size: 5, sizeAttenuation: false, depthTest: false })); m.renderOrder = 31; g.add(m); }
+    if (this.dimFirst) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints([P(this.dimFirst.p)]), new THREE.PointsMaterial({ color: 0xff8a00, size: 11, sizeAttenuation: false, depthTest: false })); m.renderOrder = 32; g.add(m); }
+    if (this.showGrid) this.drawGrid(g, P);
     // origine de l'esquisse
     const o = P([0, 0]); const s = this.px() * 18;
     const ax = new THREE.BufferGeometry().setFromPoints([P([-s, 0]), P([s, 0])]), ay = new THREE.BufferGeometry().setFromPoints([P([0, -s]), P([0, s])]);
@@ -248,6 +279,54 @@ export class Sketcher {
     void o;
     // grille
     this.v.render();
+  }
+  drawGrid(g, P) {
+    const step = this.gridStep() * 2; const c = this.v.controls.target.toArray(); const c2 = to2D(this.plane, c);
+    const half = (this.v.camera.top - this.v.camera.bottom) / this.v.camera.zoom * 1.2;
+    const n = Math.min(120, Math.ceil(half / step));
+    const x0 = Math.round(c2[0] / step) * step, y0 = Math.round(c2[1] / step) * step;
+    const pts = [];
+    for (let i = -n; i <= n; i++) {
+      pts.push(P([x0 + i * step, y0 - n * step]), P([x0 + i * step, y0 + n * step]));
+      pts.push(P([x0 - n * step, y0 + i * step]), P([x0 + n * step, y0 + i * step]));
+    }
+    const ls = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x9fb0c2, transparent: true, opacity: 0.35, depthTest: false }));
+    ls.renderOrder = 29; g.add(ls);
+  }
+  // déplacer / copier / pivoter les entités sélectionnées
+  transformSelected(fn, copy) {
+    const sel = this.ents.filter(e => this.sel.has(e.id)); if (!sel.length) return "Sélectionnez des entités";
+    this.snapshot();
+    const gmap = {};
+    for (const e of sel) {
+      const c = copy ? JSON.parse(JSON.stringify(e)) : e;
+      if (copy) { c.id = newId(); if (c.g) c.g = gmap[c.g] ||= newId("g"); }
+      for (const k of ["a", "b", "m", "c", "p", "pc"]) if (c[k]) c[k] = fn(c[k]).map(round);
+      if (copy) this.ents.push(c);
+    }
+    this.changed(); return null;
+  }
+  moveSelected(dx, dy, copy) { return this.transformSelected(p => [p[0] + dx, p[1] + dy], copy); }
+  rotateSelected(cx, cy, deg, copy) { const a = deg * Math.PI / 180; return this.transformSelected(p => v2.add([cx, cy], v2.rot(v2.sub(p, [cx, cy]), a)), copy); }
+  // cote entre deux points : déplace le second point (et tout ce qui y est relié)
+  setDistance(p1, p2, val, mode) {
+    let target;
+    if (mode === "h") target = [p1[0] + Math.sign(p2[0] - p1[0] || 1) * val, p2[1]];
+    else if (mode === "v") target = [p2[0], p1[1] + Math.sign(p2[1] - p1[1] || 1) * val];
+    else { const d = v2.norm(v2.sub(p2, p1)); target = v2.add(p1, v2.mul(d, val)); }
+    if (v2.eq(p2, [0, 0])) { // l'origine est fixe : on déplace l'autre point
+      const back = mode === "h" ? [p2[0] - Math.sign(p2[0] - p1[0] || 1) * val, p1[1]] : mode === "v" ? [p1[0], p2[1] - Math.sign(p2[1] - p1[1] || 1) * val] : v2.sub(p2, v2.mul(v2.norm(v2.sub(p2, p1)), val));
+      movePointAll(this.ents, p1, back.map(round)); return;
+    }
+    const g = this.ents.find(e => e.g && e.gk === "rect" && (v2.eq(e.a, p2) || v2.eq(e.b, p2)));
+    if (g) { // déplacer tout le rectangle pour garder sa forme
+      const d = v2.sub(target, p2); const corners = new Map();
+      for (const e of this.ents.filter(x => x.g === g.g)) for (const k of ["a", "b"]) corners.set(e[k].map(v => v.toFixed(6)).join(), [...e[k]]);
+      const tmp = [...corners.values()].map((old, i) => { const t = [2e9 + i, 2e9 + i]; movePointAll(this.ents, old, t); return [t, v2.add(old, d).map(round)]; });
+      for (const [t, nw] of tmp) movePointAll(this.ents, t, nw);
+      return;
+    }
+    movePointAll(this.ents, p2, target.map(round));
   }
   updateLabels() {
     if (!this.showDims) { this.labels.innerHTML = ""; return; }
@@ -342,9 +421,8 @@ export class Sketcher {
   // convertir les arêtes d'une face du modèle
   convertFace(face) {
     const P = p => to2D(this.plane, p).map(round);
-    const wires = [face.outerWire(), ...face.innerWires()];
     this.snapshot();
-    for (const w of wires) for (const ed of w.edges) {
+    for (const ed of face.edges) {
       const t = ed.geomType;
       const s = ed.startPoint.toTuple(), en = ed.endPoint.toTuple();
       if (t === "LINE") this.add({ t: "line", a: P(s), b: P(en) });
@@ -374,6 +452,33 @@ export function polyLines(c, r, n, a0) {
   for (let i = 0; i < n; i++) { const t = a0 + i * 2 * Math.PI / n; pts.push([round(c[0] + r * Math.cos(t)), round(c[1] + r * Math.sin(t))]); }
   return pts.map((p, i) => ({ id: newId(), t: "line", a: p, b: [...pts[(i + 1) % n]], g, gk: "poly", pc: c, pr: r, pn: n }));
 }
+function arcCenter(c, a, p) {
+  const r = v2.dist(c, a); if (r < 1e-9) return null;
+  const a0 = Math.atan2(a[1] - c[1], a[0] - c[0]); let a1 = Math.atan2(p[1] - c[1], p[0] - c[0]);
+  let sw = a1 - a0; while (sw <= 0) sw += 2 * Math.PI; // sens trigonométrique
+  if (sw > 2 * Math.PI - 1e-6) return null;
+  const pt = t => [round(c[0] + r * Math.cos(t)), round(c[1] + r * Math.sin(t))];
+  return { t: "arc", a: [...a], b: pt(a0 + sw), m: pt(a0 + sw / 2) };
+}
+function arcTangent(s, dir, p) {
+  if (!dir) return null;
+  const ch = v2.sub(p, s); const L = v2.len(ch); if (L < 1e-9) return null;
+  const n = [-dir[1], dir[0]]; const k = v2.dot(ch, n); if (Math.abs(k) < 1e-9) return null;
+  const r = (L * L) / (2 * k); const c = v2.add(s, v2.mul(n, r)); // r signé
+  const R0 = Math.abs(r);
+  const a0 = Math.atan2(s[1] - c[1], s[0] - c[0]), a1 = Math.atan2(p[1] - c[1], p[0] - c[0]);
+  let sw = a1 - a0; if (r > 0) { while (sw <= 0) sw += 2 * Math.PI; } else { while (sw >= 0) sw -= 2 * Math.PI; }
+  const t = a0 + sw / 2;
+  return { t: "arc", a: [...s], b: [...p], m: [round(c[0] + R0 * Math.cos(t)), round(c[1] + R0 * Math.sin(t))] };
+}
+function arcEndTangent(e, p) {
+  const C0 = circleFrom3(e.a, e.m, e.b); if (!C0) return null;
+  const rad = v2.norm(v2.sub(p, C0.c)); let tg = [-rad[1], rad[0]];
+  // orienter dans le sens de parcours (de l'intérieur de l'arc vers l'extrémité)
+  const other = v2.eq(e.b, p) ? e.m : e.m; const toward = v2.sub(p, other);
+  if (v2.dot(tg, toward) < 0) tg = [-tg[0], -tg[1]];
+  return tg;
+}
 function distPointLine(p, a, b) { const d = v2.norm(v2.sub(b, a)); return Math.abs(v2.cross(d, v2.sub(p, a))); }
 function distPointSeg(p, a, b) {
   const ab = v2.sub(b, a); const l2 = v2.dot(ab, ab); if (!l2) return v2.dist(p, a);
@@ -395,6 +500,19 @@ export function entDist(e, p) {
   return d;
 }
 function movePoint(ents, from, to) { movePointAll(ents, from, to); }
+// déplacer un coin de rectangle : le coin opposé reste fixe, les deux autres suivent
+function moveRectCorner(ents, g, from, to) {
+  const lines = ents.filter(e => e.g === g);
+  const pts = []; for (const e of lines) for (const k of ["a", "b"]) if (!pts.some(q => v2.eq(q, e[k]))) pts.push([...e[k]]);
+  if (pts.length !== 4) return movePointAll(ents, from, to);
+  const opp = pts.reduce((best, q) => v2.dist(q, from) > v2.dist(best, from) ? q : best, pts[0]);
+  const others = pts.filter(q => !v2.eq(q, from) && !v2.eq(q, opp));
+  // coin partageant x avec "from" -> prend x de "to"
+  const plan = others.map(q => [q, Math.abs(q[0] - from[0]) < 1e-6 ? [to[0], q[1]] : [q[0], to[1]]]);
+  plan.push([from, to]);
+  const tmp = plan.map(([old, nw], i) => { const t = [3e9 + i, 3e9 + i]; movePointAll(ents, old, t); return [t, nw]; });
+  for (const [t, nw] of tmp) movePointAll(ents, t, nw);
+}
 export function movePointAll(ents, from, to) {
   for (const e of ents) for (const k of handleKeys(e)) if (v2.eq(e[k], from, 1e-6)) {
     if (e.t === "arc") { // conserver la forme de l'arc approximativement

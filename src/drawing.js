@@ -27,8 +27,10 @@ export function buildDrawing(shape, opts) {
   const [W, H] = SHEETS[opts.format] || SHEETS.A3;
   const margin = 10, tbH = 32, tbW = 180;
   const views = {};
+  const vsel = opts.views || { face: true, dessus: true, gauche: true };
   for (const k of ["face", "dessus", "gauche", "iso"]) {
     if (k === "iso" && !opts.iso) continue;
+    if (k !== "iso" && !vsel[k]) continue;
     const v = VIEWS[k]; const n = Math.hypot(...v.dir); const xn = Math.hypot(...v.x);
     views[k] = project(shape, v.dir.map(x => x / n), v.x.map(x => x / xn));
   }
@@ -37,7 +39,8 @@ export function buildDrawing(shape, opts) {
   const sz = k => views[k] ? [views[k].bb.maxX - views[k].bb.minX, views[k].bb.maxY - views[k].bb.minY] : [0, 0];
   const [fw, fh] = sz("face"), [tw, th] = sz("dessus"), [lw, lh] = sz("gauche"), [iw, ih] = sz("iso");
   const gap = 25;
-  const availW = W - 2 * margin - 20, availH = H - 2 * margin - tbH - 20;
+  const tableH = opts.table ? 8 + opts.table.length * 5 : 0;
+  const availW = W - 2 * margin - 20, availH = H - 2 * margin - tbH - 20 - (opts.table ? Math.min(tableH, 60) : 0);
   let scale = opts.scale;
   if (!scale || scale === "auto") {
     scale = SCALES[SCALES.length - 1];
@@ -52,14 +55,25 @@ export function buildDrawing(shape, opts) {
   pos.face = [x0 + fw * scale / 2 + gap / 2, y0 + fh * scale / 2 + gap / 2];
   pos.dessus = [pos.face[0], pos.face[1] + fh * scale / 2 + gap + th * scale / 2];
   pos.gauche = [pos.face[0] + fw * scale / 2 + gap + lw * scale / 2, pos.face[1]];
-  if (opts.iso) pos.iso = [W - margin - 15 - iw * scale * 0.8 / 2, pos.face[1] + Math.max(fh * scale / 2, 10) + gap + ih * scale * 0.8 / 2];
+  let isoScale = scale * 0.8;
+  if (opts.iso && iw > 0 && ih > 0) {
+    // zone libre à droite des vues, au-dessus du cartouche / de la liste de débit
+    const leftEdge = Math.max(pos.face[0] + fw * scale / 2, vsel.gauche ? pos.gauche[0] + lw * scale / 2 : 0) + gap;
+    const bottomEdge = H - margin - tbH - 10 - (opts.table ? 5 * (opts.table.length + 1) + 6 : 0);
+    let bx0 = leftEdge, by0 = margin + 12, bx1 = W - margin - 10, by1 = bottomEdge;
+    if (bx1 - bx0 < 60) { // pas de place à droite : sous la vue de dessus
+      bx0 = margin + 15; bx1 = W - margin - tbW - 20; by0 = pos.dessus[1] + th * scale / 2 + gap; by1 = H - margin - 10;
+    }
+    isoScale = Math.min(scale, (bx1 - bx0) / iw, (by1 - by0 - 8) / ih) * 0.95;
+    pos.iso = [(bx0 + bx1) / 2, by0 + (by1 - by0 - 8) / 2];
+  }
   const out = [];
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}" font-family="Arial, Helvetica, sans-serif">`);
   out.push(`<rect width="${W}" height="${H}" fill="#fff"/>`);
   out.push(`<rect x="${margin}" y="${margin}" width="${W - 2 * margin}" height="${H - 2 * margin}" fill="none" stroke="#000" stroke-width="0.5"/>`);
   const dims = [];
   for (const [k, v] of Object.entries(views)) {
-    const s = k === "iso" ? scale * 0.8 : scale;
+    const s = k === "iso" ? isoScale : scale;
     const cx = (v.bb.minX + v.bb.maxX) / 2, cy = (v.bb.minY + v.bb.maxY) / 2;
     const [px, py] = pos[k];
     // replicad toSVGPaths inverse y : y_svg = -y_cam
@@ -87,7 +101,7 @@ export function buildDrawing(shape, opts) {
   const t = (x, y, s, txt, w = "normal", anchor = "start") => `<text x="${x}" y="${y}" font-size="${s}" font-weight="${w}" text-anchor="${anchor}" fill="#000">${esc(txt)}</text>`;
   out.push(t(tx + 3, ty + 5.5, 4.2, opts.company || "G&L Créations", "bold"));
   out.push(t(tx + 3, ty + 10.3, 3.2, opts.title || "Pièce"));
-  out.push(t(tx + tbW - 3, ty + 5.5, 2.6, opts.companyInfo || "Métallerie – Ferronnerie – Rénovation", "normal", "end"));
+  out.push(t(tx + tbW - 3, ty + 5.5, 2.6, opts.companyInfo || "Métallerie – Ferronnerie – Rénovation – 30140 Massillargues-Attuech", "normal", "end"));
   out.push(t(tx + tbW - 3, ty + 10.3, 2.6, "Unités : mm", "normal", "end"));
   out.push(t(tx + 2, ty + 15.5, 2.3, "Matériau"), t(tx + 2, ty + 20, 3, opts.material || "-", "bold"));
   out.push(t(tx + 62, ty + 15.5, 2.3, "Échelle"), t(tx + 62, ty + 20, 3, scaleLabel(scale), "bold"));
@@ -98,6 +112,20 @@ export function buildDrawing(shape, opts) {
   if (opts.notes) out.push(t(margin + 4, H - margin - 4, 3, opts.notes));
   // symbole de projection européenne
   out.push(`<g transform="translate(${tx - 22} ${ty + tbH - 12})" stroke="#000" stroke-width="0.3" fill="none"><path d="M0 2 L8 0 L8 10 L0 8 Z"/><circle cx="15" cy="5" r="4"/><circle cx="15" cy="5" r="2"/></g>`);
+  if (opts.table && opts.table.length) {
+    // liste de débit au-dessus du cartouche
+    const cols = [["N°", 10], ["Profilé", 62], ["Long. (mm)", 26], ["Coupes", 34], ["Qté", 14], ["Masse (kg)", 34]];
+    const rowH = 5, tw2 = cols.reduce((a, c) => a + c[1], 0);
+    let yy = ty - 4 - rowH * (opts.table.length + 1); const xx = W - margin - tw2;
+    out.push(`<g stroke="#000" stroke-width="0.25" fill="none"><rect x="${xx}" y="${yy}" width="${tw2}" height="${rowH * (opts.table.length + 1)}"/></g>`);
+    let cx = xx;
+    for (const [lab, w] of cols) { out.push(t(cx + 1.5, yy + 3.6, 2.6, lab, "bold")); cx += w; out.push(`<line x1="${cx}" y1="${yy}" x2="${cx}" y2="${yy + rowH * (opts.table.length + 1)}" stroke="#000" stroke-width="0.2"/>`); }
+    opts.table.forEach((r, i) => {
+      const y = yy + rowH * (i + 1); out.push(`<line x1="${xx}" y1="${y}" x2="${xx + tw2}" y2="${y}" stroke="#000" stroke-width="0.2"/>`);
+      const vals = [String(i + 1), r.profile, fmt(r.length), r.cuts.length ? r.cuts.map(c => fmt(c) + "°").join(" / ") : "droit", String(r.qty), fmt(r.mass * r.qty)];
+      let x2 = xx; vals.forEach((v, j) => { out.push(t(x2 + 1.5, y + 3.6, 2.5, v)); x2 += cols[j][1]; });
+    });
+  }
   out.push(`</svg>`);
   return { svg: out.join("\n"), scale, W, H };
 }

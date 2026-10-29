@@ -90,12 +90,13 @@ function commit(fn) { snapshot(); fn(); recompute(); autosave(); }
 function bodiesOf(state) {
   const out = [];
   if (state.main) out.push({ shape: state.main, color: doc.material?.color || "#a9b4bf", name: "Corps principal", kind: "main" });
-  out.push(...state.bodies);
+  const hidden = new Set(doc.features.filter(f => f.hidden).map(f => f.id));
+  out.push(...state.bodies.filter(b => !hidden.has(b.feature)));
   return out;
 }
 function recompute(state) {
   st = state || rebuild(doc);
-  viewer.refPlanes = Object.entries(st.planes).map(([id, plane]) => ({ id, plane }));
+  viewer.refPlanes = Object.entries(st.planes).filter(([id]) => !doc.features.find(f => f.id === id)?.hidden).map(([id, plane]) => ({ id, plane }));
   viewer.setBodies(bodiesOf(st));
   { const b = viewer.modelBounds(); const sz = b.getSize(new THREE.Vector3()); const m = Math.max(sz.x, sz.y, sz.z); viewer.planeSize = viewer.bodies.length ? Math.max(60, m * 1.15) : 200; }
   viewer.buildPlanes();
@@ -114,11 +115,21 @@ function renderTree() {
   h += `<div class="ti" data-act="material">${icon("material", 16)}<span class="nm">${esc(doc.material?.name || "Matériau")}</span></div>`;
   for (const k of ["front", "top", "right"]) h += `<div class="ti ${isSelPlane(k) ? "sel" : ""}" data-plane="${k}">${icon("plane", 16)}<span class="nm">${STD_PLANES[k].name}</span></div>`;
   h += `<div class="ti">${icon("origin", 16)}<span class="nm">Origine</span></div>`;
+  const consumer = {};
+  doc.features.forEach(f => { for (const sid of [f.sketch, f.profile, f.path, ...(f.sketches || [])].filter(Boolean)) if (!consumer[sid]) consumer[sid] = f.id; });
+  const itemHtml = (f, i, child) => {
+    const cls = ["ti", child ? "child" : "", treeSel === f.id ? "sel" : "", f.suppressed ? "supp" : "", st?.errors[f.id] ? "err" : "", i >= rb ? "after" : ""].join(" ");
+    const tip = st?.errors[f.id] ? "Erreur : " + st.errors[f.id] : featureLabel(f.type) + (f.type === "sketch" ? " – double-clic pour modifier" : " – double-clic pour modifier, clic droit pour plus d'options");
+    return `<div class="${cls}" data-id="${f.id}" data-idx="${i}" title="${esc(tip)}">${icon(st?.errors[f.id] ? "error" : TYPE_ICON[f.type] || "part", child ? 14 : 16)}<span class="nm">${esc(f.name)}</span>${f.hidden ? `<span style="margin-left:auto;color:#8a94a0">${icon("hide", 14)}</span>` : ""}</div>`;
+  };
   doc.features.forEach((f, i) => {
-    if (i === rb) h += `<div class="rollbar" title="Barre de reprise"></div>`;
-    const cls = ["ti", treeSel === f.id ? "sel" : "", f.suppressed ? "supp" : "", st?.errors[f.id] ? "err" : "", i >= rb ? "after" : ""].join(" ");
-    const tip = st?.errors[f.id] ? "Erreur : " + st.errors[f.id] : featureLabel(f.type);
-    h += `<div class="${cls}" data-id="${f.id}" title="${esc(tip)}">${icon(st?.errors[f.id] ? "error" : TYPE_ICON[f.type] || "part", 16)}<span class="nm">${esc(f.name)}</span></div>`;
+    if (i === rb) h += `<div class="rollbar" title="Barre de reprise – faites-la glisser"></div>`;
+    if (f.type === "sketch" && consumer[f.id]) return; // affichée sous la fonction qui l'utilise
+    h += itemHtml(f, i, false);
+    for (const sid of [f.sketch, f.profile, f.path, ...(f.sketches || [])].filter(Boolean)) {
+      if (consumer[sid] !== f.id) continue;
+      const sf = doc.features.find(q => q.id === sid); if (sf) h += itemHtml(sf, doc.features.indexOf(sf), true);
+    }
     if (f.type === "weld" && st?.info[f.id]) st.info[f.id].forEach((m, j) => h += `<div class="ti child" data-id="${f.id}">${icon("weldmember", 14)}<span class="nm sub">${esc(m.profile)} – ${fmt(m.length, 1)} mm</span></div>`);
     if (f.type === "sheet" && st?.info[f.id]) h += `<div class="ti child" data-flat="${f.id}">${icon("flat", 14)}<span class="nm sub">Mise à plat : ${fmt(st.info[f.id].flat, 2)} × ${fmt(st.info[f.id].width, 1)}</span></div>`;
   });
@@ -138,6 +149,18 @@ function renderTree() {
     el.ondblclick = () => startSketch({ kind: "std", std: el.dataset.plane });
   });
   t.querySelectorAll(".ti[data-flat]").forEach(el => el.onclick = () => showFlat(el.dataset.flat));
+  // glisser la barre de reprise
+  t.querySelectorAll(".rollbar").forEach(bar => bar.onpointerdown = e => {
+    e.preventDefault(); bar.setPointerCapture(e.pointerId);
+    let target = null;
+    const move = ev2 => {
+      const el = document.elementFromPoint(ev2.clientX, ev2.clientY)?.closest(".ti[data-idx]");
+      t.querySelectorAll(".ti").forEach(x => x.style.boxShadow = "");
+      if (el) { el.style.boxShadow = "0 3px 0 var(--accent)"; target = +el.dataset.idx + 1; }
+    };
+    bar.onpointermove = move;
+    bar.onpointerup = () => { bar.onpointermove = null; bar.onpointerup = null; if (target != null) commit(() => doc.rollback = target >= doc.features.length ? null : target); else renderTree(); };
+  });
   const mat = t.querySelector('[data-act="material"]'); if (mat) mat.onclick = showMaterial;
 }
 function isSelPlane(k) { return selection.some(s => s.kind === "plane" && s.ref.kind === "std" && s.ref.std === k); }
@@ -148,6 +171,7 @@ function featureMenu(id, x, y) {
     { label: "Éditer la fonction", icon: "sketch", click: () => editFeature(id) },
     { label: "Renommer", click: () => renameFeature(f) },
     { label: f.suppressed ? "Réactiver" : "Supprimer temporairement (désactiver)", click: () => commit(() => f.suppressed = !f.suppressed) },
+    ...(["weld", "plane"].includes(f.type) ? [{ label: f.hidden ? "Afficher" : "Masquer", icon: f.hidden ? "eye" : "hide", click: () => commit(() => f.hidden = !f.hidden) }] : []),
     { label: "Placer la barre de reprise avant", click: () => commit(() => doc.rollback = idx) },
     { label: "Ramener la barre à la fin", click: () => commit(() => doc.rollback = null) },
     "-",
@@ -186,7 +210,7 @@ function nextName(type) {
 }
 
 // ---------------- Barre de commandes
-const SKETCH_TOOLS = [["select", "Sélection"], ["line", "Ligne"], ["rect", "Rectangle"], ["crect", "Rectangle centré"], ["circle", "Cercle"], ["arc", "Arc 3 points"], ["poly", "Polygone"], ["slot", "Rainure"], ["centerline", "Axe de construction"], ["point", "Point"], "|", ["dim", "Cotation"], ["sfillet", "Congé d'esquisse"], ["trim", "Ajuster"], ["offset", "Décaler entités"], ["smirror", "Symétrie d'entités"], ["spattern", "Répétition d'entités"], ["convert", "Convertir entités"], "|", ["exit", "Quitter l'esquisse"]];
+const SKETCH_TOOLS = [["select", "Sélection"], ["line", "Ligne"], ["rect", "Rectangle"], ["crect", "Rectangle centré"], ["circle", "Cercle"], ["arc", "Arc 3 points"], ["carc", "Arc par centre"], ["tarc", "Arc tangent"], ["poly", "Polygone"], ["slot", "Rainure"], ["centerline", "Axe de construction"], ["point", "Point"], "|", ["dim", "Cotation"], ["sfillet", "Congé d'esquisse"], ["trim", "Ajuster"], ["move", "Déplacer / copier"], ["rotate", "Pivoter"], ["offset", "Décaler entités"], ["smirror", "Symétrie d'entités"], ["spattern", "Répétition d'entités"], ["convert", "Convertir entités"], "|", ["exit", "Quitter l'esquisse"]];
 const TABS = {
   fonctions: { label: "Fonctions", tools: [["extrude", "Bossage extrudé"], ["revolve", "Bossage avec révolution"], ["sweep", "Balayage"], ["loft", "Lissage"], "|", ["cut", "Enlèvement extrudé"], ["revcut", "Enlèvement avec révolution"], ["hole", "Assistance perçage"], "|", ["fillet", "Congé"], ["chamfer", "Chanfrein"], ["shell", "Coque"], ["draft", "Dépouille"], "|", ["lpattern", "Répétition linéaire"], ["cpattern", "Répétition circulaire"], ["mirror", "Symétrie"], "|", ["plane", "Plan de référence"], ["import", "Importer STEP / STL"]] },
   esquisse: { label: "Esquisse", tools: [["sketch", "Esquisse"]] },
@@ -305,7 +329,7 @@ function bindViewport() {
   });
 }
 function pickFilter() {
-  if (mode === "pm" && pm?.active) { const t = pm.fieldType(pm.active); return { face: t === "faces" || t === "face" || t === "points", edge: t === "edges", plane: t === "planeSel" }; }
+  if (mode === "pm" && pm?.active) { const t = pm.fieldType(pm.active); return { face: t === "faces" || t === "face" || t === "points" || t === "edges", edge: t === "edges", plane: t === "planeSel" }; }
   if (mode === "pickplane") return { face: true, plane: true };
   if (mode === "sketch") return { face: true };
   return { face: true, edge: true, plane: true };
@@ -395,8 +419,9 @@ function enterSketch(f, isNew, idx) {
   viewer.setSketchControls();
   viewer.setView(plane.n, planeY(plane), true, plane.o);
   sk = new Sketcher(viewer, plane, f.entities, {
-    onSketchChange: () => renderSketchPM(), onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim,
+    onSketchChange: () => renderSketchPM(), onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim, editDistance, toast,
   });
+  sk.showGrid = true;
   sk.setTool("line");
   curTab = "esquisse"; renderTabs();
   $("#confirm").style.display = "flex";
@@ -427,6 +452,8 @@ function sketchCommand(k) {
   if (k === "sfillet") return sk.setTool("fillet");
   if (k === "smirror") { const err = sk.mirrorSelected(); if (err) toast(err, true); return; }
   if (k === "offset") { sk.pendingOp = "offset"; renderSketchPM(); return; }
+  if (k === "move") { sk.pendingOp = "move"; renderSketchPM(); if (!sk.sel.size) toast("Sélectionnez d'abord les entités (outil Sélection, Maj+clic pour en ajouter)"); return; }
+  if (k === "rotate") { sk.pendingOp = "rotate"; renderSketchPM(); if (!sk.sel.size) toast("Sélectionnez d'abord les entités (outil Sélection, Maj+clic pour en ajouter)"); return; }
   if (k === "spattern") { sk.pendingOp = "pattern"; renderSketchPM(); return; }
   if (k === "convert") { sk.setTool("convert"); toast("Cliquez sur une face du modèle pour projeter ses arêtes"); return; }
   if (SKETCH_TOOLS.some(t => t[0] === k)) sk.setTool(k);
@@ -438,13 +465,19 @@ function renderSketchPM() {
   h += `<div class="grp"><h4>Options</h4>
     <div class="fld chk"><input type="checkbox" id="oGrid" ${sk.gridSnap ? "checked" : ""}><label for="oGrid">Accrochage à la grille (pas ${fmt(sk.gridStep(), 3)} mm)</label></div>
     <div class="fld chk"><input type="checkbox" id="oDims" ${sk.showDims ? "checked" : ""}><label for="oDims">Afficher les cotes (cliquer pour modifier)</label></div>
+    <div class="fld chk"><input type="checkbox" id="oShowGrid" ${sk.showGrid ? "checked" : ""}><label for="oShowGrid">Afficher la grille</label></div>
+    ${sk.tool === "carc" ? `<div class="hint">1) centre, 2) point de départ, 3) point d'arrivée (sens anti-horaire).</div>` : ""}
+    ${sk.tool === "tarc" ? `<div class="hint">Cliquez l'extrémité d'une ligne ou d'un arc, puis le point d'arrivée.</div>` : ""}
+    ${sk.tool === "arc" ? `<div class="hint">1) départ, 2) arrivée, 3) un point sur l'arc.</div>` : ""}
     ${sk.tool === "poly" ? `<div class="fld"><label>Nombre de côtés</label><input type="number" id="oSides" min="3" max="64" value="${sk.polySides}"></div>` : ""}
     ${sk.tool === "fillet" ? `<div class="fld"><label>Rayon du congé</label><input type="text" id="oFil" value="${sk.filletR}"></div><div class="hint">Cliquez sur un coin entre deux lignes.</div>` : ""}
     ${sk.tool === "trim" ? `<div class="hint">Cliquez sur la portion d'entité à supprimer.</div>` : ""}
-    ${sk.tool === "dim" ? `<div class="hint">Cliquez sur une entité pour saisir sa cote.</div>` : ""}
+    ${sk.tool === "dim" ? `<div class="hint">Cliquez une entité pour sa cote (longueur, Ø, R)… ou cliquez 2 points (extrémités, centres, origine) pour coter la distance entre eux.</div>` : ""}
     <div class="btnrow"><button class="btn" id="oUndo">↶ Annuler</button><button class="btn" id="oRedo">↷ Rétablir</button><button class="btn" id="oDel" ${selEnts.length ? "" : "disabled"}>Supprimer</button></div>
   </div>`;
   if (sk.pendingOp === "offset") h += `<div class="grp"><h4>Décaler les entités sélectionnées</h4><div class="fld"><label>Distance</label><input type="text" id="opD" value="5"></div><div class="btnrow"><button class="btn pri" id="opGo">Appliquer</button><button class="btn" id="opX">Fermer</button></div></div>`;
+  if (sk.pendingOp === "move") h += `<div class="grp"><h4>Déplacer / copier la sélection</h4><div class="fld"><label>ΔX</label><input type="text" id="mvX" value="10"></div><div class="fld"><label>ΔY</label><input type="text" id="mvY" value="0"></div><div class="fld chk"><input type="checkbox" id="mvC"><label for="mvC">Copier (garder l'original)</label></div><div class="btnrow"><button class="btn pri" id="opGo">Appliquer</button><button class="btn" id="opX">Fermer</button></div></div>`;
+  if (sk.pendingOp === "rotate") h += `<div class="grp"><h4>Pivoter la sélection</h4><div class="fld"><label>Centre X</label><input type="text" id="rtX" value="0"></div><div class="fld"><label>Centre Y</label><input type="text" id="rtY" value="0"></div><div class="fld"><label>Angle (°)</label><input type="text" id="rtA" value="90"></div><div class="fld chk"><input type="checkbox" id="rtC"><label for="rtC">Copier (garder l'original)</label></div><div class="btnrow"><button class="btn pri" id="opGo">Appliquer</button><button class="btn" id="opX">Fermer</button></div></div>`;
   if (sk.pendingOp === "pattern") h += `<div class="grp"><h4>Répétition linéaire d'entités</h4><div class="fld"><label>Pas X</label><input type="text" id="opX1" value="50"></div><div class="fld"><label>Pas Y</label><input type="text" id="opY1" value="0"></div><div class="fld"><label>Nombre</label><input type="text" id="opN" value="3"></div><div class="btnrow"><button class="btn pri" id="opGo">Appliquer</button><button class="btn" id="opX">Fermer</button></div></div>`;
   if (selEnts.length === 1) h += entityEditor(selEnts[0]);
   else if (selEnts.length > 1) h += `<div class="grp"><div class="hint">${selEnts.length} entités sélectionnées. Avec un axe de construction dans la sélection, utilisez « Symétrie d'entités ».</div><div class="btnrow"><button class="btn" id="oCons">Basculer construction</button></div></div>`;
@@ -454,6 +487,7 @@ function renderSketchPM() {
   $("#skOk").onclick = () => exitSketch(true); $("#skNo").onclick = () => exitSketch(false);
   $("#oGrid").onchange = e => { sk.gridSnap = e.target.checked; };
   $("#oDims").onchange = e => { sk.showDims = e.target.checked; viewer.render(); };
+  $("#oShowGrid").onchange = e => { sk.showGrid = e.target.checked; sk.draw(); };
   $("#oUndo").onclick = () => sk.undo(); $("#oRedo").onclick = () => sk.redo(); $("#oDel").onclick = () => sk.deleteSelected();
   $("#oDxf").onclick = () => exportSketchDXF({ name: skCtx.f.name, entities: sk.ents });
   const s = $("#oSides"); if (s) s.onchange = () => sk.polySides = Math.max(3, Math.min(64, parseInt(s.value) || 6));
@@ -461,7 +495,10 @@ function renderSketchPM() {
   const oc = $("#oCons"); if (oc) oc.onclick = () => { sk.snapshot(); selEnts.forEach(e => e.cons = !e.cons); sk.changed(); };
   const go = $("#opGo"); if (go) go.onclick = () => {
     let err;
-    if (sk.pendingOp === "offset") err = sk.offsetSelected(ev()($("#opD").value));
+    const E = ev();
+    if (sk.pendingOp === "offset") err = sk.offsetSelected(E($("#opD").value));
+    else if (sk.pendingOp === "move") err = sk.moveSelected(E($("#mvX").value), E($("#mvY").value), $("#mvC").checked);
+    else if (sk.pendingOp === "rotate") err = sk.rotateSelected(E($("#rtX").value), E($("#rtY").value), E($("#rtA").value), $("#rtC").checked);
     else err = sk.linearPatternSelected(ev()($("#opX1").value), ev()($("#opY1").value), Math.max(2, Math.round(ev()($("#opN").value))));
     if (err) toast(err, true);
   };
@@ -517,6 +554,22 @@ function bindEntityEditor(e) {
   });
 }
 import { movePointAll as import_movePointAll } from "./sketcher.js";
+function editDistance(s, p1, p2, evt) {
+  document.querySelectorAll(".dimpop").forEach(x => x.remove());
+  const dx = Math.abs(p2[0] - p1[0]), dy = Math.abs(p2[1] - p1[1]);
+  let mode = dy < 1e-6 ? "h" : dx < 1e-6 ? "v" : "a";
+  const pop = document.createElement("div"); pop.className = "dimpop";
+  const r = viewer.container.getBoundingClientRect();
+  pop.style.left = Math.min(evt.clientX - r.left + 8, r.width - 280) + "px"; pop.style.top = (evt.clientY - r.top + 8) + "px";
+  const cur = () => mode === "h" ? dx : mode === "v" ? dy : v2.dist(p1, p2);
+  pop.innerHTML = `<select><option value="a">Alignée</option><option value="h">Horizontale</option><option value="v">Verticale</option></select><input type="text"><button class="ok">✓</button><button class="no">✕</button>`;
+  const sel = pop.querySelector("select"), inp = pop.querySelector("input"); sel.value = mode; inp.value = fmt(cur(), 4);
+  sel.onchange = () => { mode = sel.value; inp.value = fmt(cur(), 4); inp.focus(); inp.select(); };
+  viewer.container.appendChild(pop); setTimeout(() => { inp.focus(); inp.select(); }, 30);
+  const ok = () => { const v = ev()(inp.value); if (v >= 0) { s.snapshot(); s.setDistance(p1, p2, v, mode); s.changed(); } pop.remove(); };
+  pop.querySelector(".ok").onclick = ok; pop.querySelector(".no").onclick = () => pop.remove();
+  inp.onkeydown = x => { x.stopPropagation(); if (x.key === "Enter") ok(); if (x.key === "Escape") pop.remove(); };
+}
 function editDim(s, e, evt) {
   document.querySelectorAll(".dimpop").forEach(x => x.remove());
   let val, apply;
@@ -554,8 +607,8 @@ function startFeature(type, extra = {}) {
   const idx = doc.rollback ?? doc.features.length;
   const f = { id: newId("f"), type, name: extra.namePrefix ? (() => { let n = 1; while (doc.features.some(q => q.name === extra.namePrefix + n)) n++; return extra.namePrefix + n; })() : nextName(type) };
   const D = {
-    extrude: { sketch: defaultSketch(idx), end: "blind", depth: 20, reverse: false, dir2: false, depth2: 10, end2: "blind", draft: 0 },
-    cut: { sketch: defaultSketch(idx), end: "blind", depth: 10, reverse: false, dir2: false, depth2: 10, end2: "blind" },
+    extrude: { sketch: defaultSketch(idx), startOffset: 0, end: "blind", depth: 20, reverse: false, dir2: false, depth2: 10, end2: "blind", draft: 0 },
+    cut: { sketch: defaultSketch(idx), startOffset: 0, end: "blind", depth: 10, reverse: false, dir2: false, depth2: 10, end2: "blind" },
     revolve: { sketch: defaultSketch(idx), axis: "", angle: 360, reverse: false },
     revcut: { sketch: defaultSketch(idx), axis: "", angle: 360, reverse: false },
     fillet: { edges: [], radius: 5 }, chamfer: { edges: [], dist: 2 },
@@ -567,7 +620,7 @@ function startFeature(type, extra = {}) {
     plane: { base: { kind: "std", std: "front" }, offset: 50, angle: 0 },
     loft: { sketches: [], op: "add", ruled: false },
     sweep: { profile: "", path: "", op: "add" },
-    weld: { sketch: defaultSketch(idx), family: "tube_carre", size: "40x40x2", corner: "miter", rot: 0, color: "#8f9ba8" },
+    weld: { sketch: defaultSketch(idx), family: "tube_carre", size: "40x40x2", corner: "miter", rot: 0, align: "center", offX: 0, offY: 0, trimT: true, color: "#8f9ba8" },
     sheet: { sketch: defaultSketch(idx), thickness: 2, radius: 2, k: 0.4, width: 100, side: "mid", mid: false, reverse: false },
   }[type] || {};
   Object.assign(f, JSON.parse(JSON.stringify(D)));
@@ -595,7 +648,7 @@ function pmSpec(f) {
   const G = [];
   switch (f.type) {
     case "extrude": case "cut":
-      G.push({ t: "Esquisse", f: [{ k: "sketch", l: "Esquisse", type: "select", o: sks }] });
+      G.push({ t: "Esquisse", f: [{ k: "sketch", l: "Esquisse", type: "select", o: sks }, { k: "startOffset", l: "Décalage du départ (mm)", type: "num" }] });
       G.push({ t: "Direction 1", f: [{ k: "end", l: "Condition de fin", type: "select", o: endOpts }, ...(f.end === "blind" || f.end === "mid" ? [{ k: "depth", l: "Profondeur (mm)", type: "num" }] : []), { k: "reverse", l: "Inverser la direction", type: "check" }, ...(f.type === "extrude" && f.end === "blind" ? [{ k: "draft", l: "Dépouille (°)", type: "num" }] : [])] });
       if (f.end === "blind" || f.end === "through") G.push({ t: "Direction 2", f: [{ k: "dir2", l: "Activer la direction 2", type: "check" }, ...(f.dir2 ? [{ k: "end2", l: "Condition de fin", type: "select", o: [["blind", "Borgne"], ["through", "À travers tout"]] }, ...(f.end2 === "blind" ? [{ k: "depth2", l: "Profondeur (mm)", type: "num" }] : [])] : [])] });
       break;
@@ -638,7 +691,8 @@ function pmSpec(f) {
     case "weld": {
       const fam = PROFILE_FAMILIES[f.family];
       G.push({ t: "Profilé", f: [{ k: "sketch", l: "Esquisse (lignes)", type: "select", o: sks }, { k: "family", l: "Type", type: "select", o: Object.entries(PROFILE_FAMILIES).map(([k, v]) => [k, v.label]) }, { k: "size", l: "Taille", type: "select", o: fam.sizes.map(s => [s, s]) }, { k: "rot", l: "Rotation du profil (°)", type: "num" }] });
-      G.push({ t: "Coins", f: [{ k: "corner", l: "Traitement des coins", type: "select", o: [["miter", "Coupe d'onglet"], ["none", "Bout à bout (sans coupe)"]] }, { k: "color", l: "Couleur", type: "color" }] });
+      G.push({ t: "Position du profil", f: [{ k: "align", l: "Ligne d'esquisse sur", type: "select", o: [["center", "Centre du profil"], ["top", "Face du dessus"], ["bottom", "Face du dessous"], ["left", "Face gauche"], ["right", "Face droite"]] }, { k: "offX", l: "Décalage X (mm)", type: "num" }, { k: "offY", l: "Décalage Y (mm)", type: "num" }] });
+      G.push({ t: "Coins et jonctions", f: [{ k: "corner", l: "Coins (2 barres)", type: "select", o: [["miter", "Coupe d'onglet"], ["none", "Bout à bout (sans coupe)"]] }, { k: "trimT", l: "Ajuster les jonctions en T contre la barre", type: "check" }, { k: "color", l: "Couleur", type: "color" }] });
       G.push({ t: "", f: [{ type: "info", html: "Chaque ligne de l'esquisse devient une barre. Pour une ossature 3D (pergola…), faites une esquisse par plan : poteaux sur le plan de face, traverses sur un plan décalé, etc." }] });
       break;
     }
@@ -680,7 +734,7 @@ function renderPM() {
         case "plane": { const cur = v ? (v.kind === "std" ? "std:" + v.std : v.kind === "ref" ? "ref:" + v.id : "face") : ""; h += `<div class="fld"><label>${x.l}</label><select data-k="${x.k}" data-plane="1">${x.o.map(([ov, ol]) => `<option value="${ov}" ${cur === ov ? "selected" : ""}>${esc(ol)}</option>`).join("")}</select></div>`; if (f.type === "plane") h += `<div class="hint">Astuce : sélectionnez une face plane avant de lancer la commande pour partir de cette face.</div>`; break; }
         case "edges": case "faces": {
           const list = v || [];
-          h += `<div class="hint">${x.l} : cliquez dans la vue pour ajouter / retirer.</div><div class="sellist ${pm.active === x.k ? "active" : ""}" data-sel="${x.k}">${list.map((r, i) => `<div class="it"><span>${x.type === "edges" ? "Arête" : "Face"} ${i + 1}</span><button data-rm="${x.k}:${i}">✕</button></div>`).join("") || '<span class="hint">aucune</span>'}</div>`;
+          h += `<div class="hint">${x.l} : cliquez dans la vue pour ajouter / retirer.${x.type === "edges" ? " Un clic sur une face ajoute toutes ses arêtes." : ""}</div><div class="sellist ${pm.active === x.k ? "active" : ""}" data-sel="${x.k}">${list.map((r, i) => `<div class="it"><span>${x.type === "edges" ? "Arête" : "Face"} ${i + 1}</span><button data-rm="${x.k}:${i}">✕</button></div>`).join("") || '<span class="hint">aucune</span>'}</div>`;
           break;
         }
         case "points": {
@@ -739,7 +793,12 @@ function renderPM() {
 function pmPick(h) {
   const f = pm.feature; const k = pm.active; const t = k && pm.fieldType(k);
   if (!h || !t) return;
-  if (t === "edges" && h.kind === "edge") {
+  if (t === "edges" && h.kind === "face") {
+    const face = bodiesOf(st)[h.body]?.shape.faces[h.face]; if (!face) return;
+    const list = f[k] ||= [];
+    for (const ed of face.edges) { const p = ed.pointAt(0.5).toTuple().map(x => Math.round(x * 1e6) / 1e6); if (!list.some(r => v3.dist(r.p, p) < 1e-3)) list.push({ p }); }
+    toast("Arêtes de la face ajoutées");
+  } else if (t === "edges" && h.kind === "edge") {
     const list = f[k] ||= [];
     const i = list.findIndex(r => v3.dist(r.p, h.p) < 1e-3 || findEdgeIdxSame(r.p, h));
     if (i >= 0) list.splice(i, 1); else list.push({ p: h.p.map(x => Math.round(x * 1e6) / 1e6) });
@@ -900,6 +959,13 @@ function showVars() {
 }
 
 // ---------------- Mécano-soudé : liste de débit
+function cutListRows() {
+  const items = [];
+  doc.features.forEach(f => { if (f.type === "weld" && st.info[f.id] && !f.suppressed) st.info[f.id].forEach(m => items.push(m)); });
+  const groups = new Map();
+  for (const m of items) { const key = m.profile + "|" + m.length.toFixed(1) + "|" + m.cuts.map(c => c.toFixed(1)).join("/"); const g = groups.get(key) || { ...m, qty: 0 }; g.qty++; groups.set(key, g); }
+  return [...groups.values()].sort((a, b) => a.profile.localeCompare(b.profile) || b.length - a.length);
+}
 function showCutList() {
   const items = [];
   doc.features.forEach(f => { if (f.type === "weld" && st.info[f.id]) st.info[f.id].forEach(m => items.push({ ...m, feat: f.name })); });
@@ -914,7 +980,7 @@ function showCutList() {
   for (const [p, v] of byProf) h += `<tr><td>${esc(p)}</td><td class="n">${fmt(v.len / 1000, 3)}</td><td class="n">${Math.ceil(v.len * 1.03 / 6000)}</td><td class="n">${fmt(v.mass, 2)}</td></tr>`;
   h += `</table><p class="hint">Longueurs = longueur hors-tout (pointe d'onglet comprise). Masses calculées avec ${esc(doc.material.name)}.</p>`;
   const csv = "N°;Profilé;Longueur (mm);Coupes;Quantité;Masse unitaire (kg);Masse totale (kg)\n" + rows.map((r, i) => [i + 1, r.profile, fmt(r.length, 1), r.cuts.length ? r.cuts.map(c => fmt(c, 1) + "°").join(" / ") : "droit", r.qty, fmt(r.mass, 2), fmt(r.mass * r.qty, 2)].join(";")).join("\n");
-  modal("Liste de débit – " + esc(doc.name), h, [{ label: "Exporter CSV (Excel)", click: () => { saveFile(doc.name + " - liste de débit.csv", "﻿" + csv, toast); return false; } }, { label: "Fermer", pri: true }], { wide: true });
+  modal("Liste de débit – " + esc(doc.name), h, [{ label: "Exporter CSV (Excel)", click: () => { saveFile(doc.name + " - liste de debit.csv", "﻿" + csv, toast); return false; } }, { label: "Fermer", pri: true }], { wide: true });
 }
 
 // ---------------- Tôlerie : mise à plat
@@ -934,6 +1000,7 @@ function showDrawing() {
   const shape = exportCompound(st);
   if (!shape) return toast("Aucun corps à mettre en plan", true);
   const mp = massProps(st, doc.material.density);
+  const hasWeld = doc.features.some(f => f.type === "weld" && st.info[f.id]);
   const opts = { format: "A3", scale: "auto", hidden: true, iso: true, dims: true, title: doc.name, author: doc.author || "", notes: "", material: doc.material.name, mass: mp ? fmt(mp.mass, 2) + " kg" : "-" };
   const body = document.createElement("div");
   body.innerHTML = `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
@@ -942,13 +1009,19 @@ function showDrawing() {
     <div class="fld"><label style="flex:none">Titre</label><input type="text" id="dT" value="${esc(opts.title)}"></div>
     <div class="fld"><label style="flex:none">Dessiné par</label><input type="text" id="dA" value="${esc(opts.author)}" style="width:110px"></div>
     <div class="fld chk"><input type="checkbox" id="dH" checked><label for="dH" style="flex:none">Arêtes cachées</label></div>
-    <div class="fld chk"><input type="checkbox" id="dI" checked><label for="dI" style="flex:none">Vue iso</label></div>
+    <div class="fld chk"><input type="checkbox" id="dVF" checked><label for="dVF" style="flex:none">Face</label></div>
+    <div class="fld chk"><input type="checkbox" id="dVD" checked><label for="dVD" style="flex:none">Dessus</label></div>
+    <div class="fld chk"><input type="checkbox" id="dVG" checked><label for="dVG" style="flex:none">Gauche</label></div>
+    <div class="fld chk"><input type="checkbox" id="dI" checked><label for="dI" style="flex:none">Iso</label></div>
+    <div class="fld chk"><input type="checkbox" id="dL" ${hasWeld ? "checked" : ""} ${hasWeld ? "" : "disabled"}><label for="dL" style="flex:none">Liste de débit</label></div>
     <div class="fld chk"><input type="checkbox" id="dD" checked><label for="dD" style="flex:none">Cotes d'encombrement</label></div>
     <div class="fld" style="flex:1 1 100%"><label style="flex:none">Notes</label><input type="text" id="dN" placeholder="ex : Ébavurer tous les angles – Finition galvanisée"></div></div><div class="sheetview" id="dV"><div class="hint">Calcul des projections…</div></div>`;
   let last = null;
   const gen = () => {
     opts.format = body.querySelector("#dF").value; const sv = body.querySelector("#dS").value; opts.scale = sv === "auto" ? "auto" : parseFloat(sv);
     opts.title = body.querySelector("#dT").value; opts.author = body.querySelector("#dA").value; opts.hidden = body.querySelector("#dH").checked; opts.iso = body.querySelector("#dI").checked; opts.dims = body.querySelector("#dD").checked; opts.notes = body.querySelector("#dN").value;
+    opts.views = { face: body.querySelector("#dVF").checked, dessus: body.querySelector("#dVD").checked, gauche: body.querySelector("#dVG").checked };
+    opts.table = body.querySelector("#dL").checked ? cutListRows() : null;
     doc.author = opts.author;
     setTimeout(() => {
       try { last = buildDrawing(shape, opts); const v = body.querySelector("#dV"); v.innerHTML = last.svg; const s = v.querySelector("svg"); s.style.width = "100%"; s.style.height = "auto"; s.removeAttribute("height"); }
@@ -1091,7 +1164,7 @@ function showHelp() {
   <li><b>Mécano-soudé</b> : dessinez des lignes (squelette) puis « Élément mécano-soudé » : tubes carrés / rectangulaires / ronds, plats, cornières, IPE, HEA, HEB, UPN… Coupes d'onglet automatiques et <b>liste de débit</b> avec longueurs, angles, masses, export CSV.</li>
   <li><b>Tôlerie</b> : dessinez un profil ouvert (lignes) puis « Tôle pliée » (épaisseur, rayon, facteur K). « Mise à plat » donne le développé et exporte le <b>DXF</b> pour la découpe laser.</li></ul>
   <h4>Souris / tactile</h4><ul><li>Clic gauche glissé : rotation (hors esquisse) • Clic droit glissé : déplacement • Molette : zoom • Clic droit : menu contextuel.</li><li>Tactile : 1 doigt = rotation, 2 doigts = zoom / déplacement.</li></ul>
-  <h4>Raccourcis</h4><ul><li>Ctrl+Z / Ctrl+Y : annuler / rétablir • Ctrl+S : enregistrer • F : zoom au mieux • Échap : annuler • Suppr : supprimer.</li></ul>
+  <h4>Raccourcis</h4><ul><li>Ctrl+Z / Ctrl+Y : annuler / rétablir • Ctrl+S : enregistrer • F : zoom au mieux • Échap : annuler • Suppr : supprimer • Entrée : valider la fonction.</li><li>Vues : Ctrl+1 face, Ctrl+2 arrière, Ctrl+3 gauche, Ctrl+4 droite, Ctrl+5 dessus, Ctrl+6 dessous, Ctrl+7 isométrique, Ctrl+8 normal à la sélection.</li></ul>
   <h4>Paramétrage</h4><p>Tous les champs numériques acceptent des formules et des variables (Évaluer → Équations). Double-cliquez une fonction de l'arbre pour la modifier ; tout est recalculé.</p>
   <h4>Fichiers</h4><p>Enregistrez le projet (.json) pour le rouvrir plus tard. Exports : STEP, STL (impression 3D), DXF, mise en plan PDF/SVG, PNG. Import STEP/STL possible. Le travail en cours est aussi gardé automatiquement dans ce navigateur.</p></div>`, [{ label: "Fermer", pri: true }], { wide: true });
   const cu = document.getElementById("chkUpd"); if (cu) cu.onclick = () => checkUpdate(true);
@@ -1111,6 +1184,11 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (k === "f" && !e.ctrlKey) viewer.zoomFit();
+  if ((e.ctrlKey || e.metaKey) && /^[1-8]$/.test(e.key)) {
+    e.preventDefault();
+    const VV = { 1: [[0, 0, 1], [0, 1, 0]], 2: [[0, 0, -1], [0, 1, 0]], 3: [[-1, 0, 0], [0, 1, 0]], 4: [[1, 0, 0], [0, 1, 0]], 5: [[0, 1, 0], [0, 0, -1]], 6: [[0, -1, 0], [0, 0, 1]], 7: [[1, 1, 1], [0, 1, 0]] };
+    if (e.key === "8") normalToSelection(); else viewer.setView(...VV[e.key]);
+  }
   if ((k === "delete") && mode === "idle" && treeSel) deleteFeature(treeSel);
   if (k === "enter" && mode === "pm") pmOk();
 });
@@ -1148,4 +1226,4 @@ async function main() {
   else { viewer.zoomFit(false); status("Prêt – choisissez un plan puis cliquez sur Esquisse (ou Nouveau → Exemple)"); }
 }
 main();
-window.__gl = { get doc() { return doc; }, get st() { return st; }, loadExample, command, viewer: () => viewer };
+window.__gl = { get doc() { return doc; }, get st() { return st; }, get sk() { return sk; }, get pm() { return pm; }, scr: (p) => viewer.toScreen(to3D(skCtx.plane, p)).map((v, i) => v + (i ? viewer.container.getBoundingClientRect().top : viewer.container.getBoundingClientRect().left)), loadExample, command, viewer: () => viewer };

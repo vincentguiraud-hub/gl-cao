@@ -53,10 +53,10 @@ const { chromium } = require('playwright');
   await tool('Évaluer', 'Vue en coupe'); await p.waitForTimeout(500); await p.click('.modal >> text=OK'); await p.waitForTimeout(300); await p.click('[data-k="section"]'); await state('coupe on/off');
   // exports
   const dl = async (fn) => { const [d] = await Promise.all([p.waitForEvent('download', { timeout: 20000 }).catch(()=>null), fn()]); return d ? d.suggestedFilename() : null; };
-  console.log('STEP', await dl(async () => { await p.click('#bExport'); await p.click('.menu >> text=STEP'); }));
-  console.log('STL', await dl(async () => { await p.click('#bExport'); await p.click('.menu >> text=STL'); }));
-  const proj = await dl(async () => { await p.click('#bSave'); }); console.log('projet', proj);
-  console.log('PNG', await dl(async () => { await p.click('#bExport'); await p.click('.menu >> text=Capture'); }));
+  console.log('STEP', await dl(async () => { await p.click('#bExport'); await p.click('[data-x="step"]'); }));
+  console.log('STL', await dl(async () => { await p.click('[data-x="stl"]'); }));
+  await p.evaluate(()=>document.querySelectorAll('.modal-bg').forEach(x=>x.remove())); const proj = await dl(async () => { await p.click('#bSave'); }); console.log('projet', proj);
+  
   // mise en plan PDF
   await tool('Mise en plan', 'Créer la mise en plan'); await p.waitForTimeout(3500);
   console.log('PDF', await dl(async () => { await p.click('.modal >> text=Exporter PDF'); }));

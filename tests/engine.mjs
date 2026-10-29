@@ -69,3 +69,21 @@ for (const [name, features] of Object.entries(cases)) {
   console.log((ok ? "OK  " : "ERR ") + name.padEnd(32) + (mp ? `V=${mp.volume.toFixed(0)} ` : "") + `${Date.now() - t0}ms ` + errs.map(([k, v]) => k + ": " + v).join(" | "));
 }
 console.log("échecs :", fails);
+// ---- fonctions v1.3
+const more = {
+  "paroi mince ouverte": [sk("s1", top, [L([0, 0], [100, 0]), L([100, 0], [100, 60]), L([100, 60], [160, 60])]), { id: "e1", type: "extrude", sketch: "s1", end: "blind", depth: 50, thin: true, thinT: 3, thinSide: "mid" }],
+  "paroi mince fermée": [sk("s1", top, rect(-50, -30, 50, 30)), { id: "e1", type: "extrude", sketch: "s1", end: "blind", depth: 50, thin: true, thinT: 2, thinSide: "left" }],
+  "couper par plan": [...base(), { id: "sp", type: "split", plane: right, offset: 10 }],
+  "déplacer corps": [...base(), { id: "mv", type: "movebody", dx: 100, ry: 45 }],
+  "copier corps x3": [...base(), { id: "mv", type: "movebody", dx: 150, copy: true, count: 3 }],
+  "insérer pièce": [{ id: "pp", type: "part", data: { features: base(), material: { density: 7.85 } }, x: 200, rz: 90, count: 2, px: 0, py: 0, pz: 100 }],
+  "perçages depuis esquisse": [...base(), sk("hp", { kind: "face", p: [0, 20, 0], n: [0, 1, 0] }, [{ id: "pt1", t: "point", p: [20, 10] }, { id: "pt2", t: "point", p: [-20, 10] }, C([0, -10], 3)]), { id: "h", type: "hole", ptsSketch: "hp", useCircles: true, kind: "simple", d: 6, end: "through" }],
+};
+let fails2 = 0;
+for (const [name, features] of Object.entries(more)) {
+  const st = rebuild({ vars: { EP: 6 }, material: { density: 7.85 }, features });
+  const errs = Object.entries(st.errors); const mp = (st.main || st.bodies.length) ? massProps(st, 7.85) : null;
+  const ok = !errs.length && mp && mp.volume > 0; if (!ok) fails2++;
+  console.log((ok ? "OK  " : "ERR ") + name.padEnd(32) + (mp ? `V=${mp.volume.toFixed(0)} corps=${st.bodies.length}` : "") + " " + errs.map(([k, v]) => k + ": " + v).join(" | "));
+}
+console.log("échecs v1.3 :", fails2);

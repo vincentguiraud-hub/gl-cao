@@ -18,7 +18,7 @@ export async function prepareImports(doc) {
 const FEATURE_LABELS = {
   sketch: "Esquisse", extrude: "Bossage extrudé", cut: "Enlèvement extrudé", revolve: "Bossage avec révolution", revcut: "Enlèvement avec révolution",
   fillet: "Congé", chamfer: "Chanfrein", shell: "Coque", hole: "Perçage", lpattern: "Répétition linéaire", cpattern: "Répétition circulaire",
-  mirror: "Symétrie", plane: "Plan", loft: "Lissage", sweep: "Balayage", weld: "Élément mécano-soudé", sheet: "Tôle pliée", import: "Corps importé", draft: "Dépouille",
+  mirror: "Symétrie", plane: "Plan", split: "Couper par un plan", movebody: "Déplacer / copier le corps", part: "Pièce insérée", loft: "Lissage", sweep: "Balayage", weld: "Élément mécano-soudé", sheet: "Tôle pliée", import: "Corps importé", draft: "Dépouille",
 };
 export const featureLabel = t => FEATURE_LABELS[t] || t;
 
@@ -81,9 +81,33 @@ function regionOf(sk) {
   return r.drawing;
 }
 
-function extrudeTool(sk, off, len) {
-  const d = regionOf(sk);
+function extrudeTool(sk, off, len, prof) {
+  const d = prof ? prof() : regionOf(sk);
   return d.sketchOnPlane(rPlane(offsetPlane(sk.plane, off))).extrude(len);
+}
+
+// Paroi mince : profil (ouvert ou fermé, lignes) épaissi
+function thinDrawing(sk, t, side) {
+  const { loops, open } = buildChains(sk.entities.filter(e => !e.cons));
+  if (sk.entities.some(e => !e.cons && e.t !== "line" && e.t !== "point")) throw new Error("La paroi mince n'accepte que des lignes");
+  const o1 = side === "left" ? t : side === "right" ? 0 : t / 2, o2 = o1 - t; // décalages gauche / droite
+  let res = null;
+  const addPoly = (poly, fuse = true) => { let pen = R.draw(poly[0]); for (let i = 1; i < poly.length; i++) pen = pen.lineTo(poly[i]); const d = pen.close(); res = !res ? d : fuse ? res.fuse(d) : res.cut(d); };
+  for (const ch of open) {
+    const pts = [startOf(ch[0]), ...ch.map(endOf)];
+    const L = offsetPolyline(pts, o1), Rr = offsetPolyline(pts, o2);
+    addPoly([...L, ...Rr.reverse()]);
+  }
+  for (const ch of loops) {
+    const pts = [startOf(ch[0]), ...ch.map(endOf)]; pts.pop();
+    const off = d => { const ext = [...pts, pts[0], pts[1]]; const o = offsetPolyline(ext, d); return o.slice(1, pts.length + 1); };
+    const A = off(o1), B = off(o2);
+    const area = q => q.reduce((s, p, i) => s + p[0] * q[(i + 1) % q.length][1] - q[(i + 1) % q.length][0] * p[1], 0) / 2;
+    const [outer, inner] = Math.abs(area(A)) > Math.abs(area(B)) ? [A, B] : [B, A];
+    addPoly(outer); addPoly(inner, false);
+  }
+  if (!res) throw new Error("Aucune ligne à épaissir");
+  return res;
 }
 
 export const HOLE_STD = {
@@ -350,19 +374,20 @@ function applyFeature0(f, st, ev, doc) {
       const sign = (f.reverse ? -1 : 1) * (op === "cut" ? -1 : 1); // enlèvement : vers la matière par défaut
       const big = bigLength(st);
       const o0 = ev(f.startOffset) || 0;
+      const prof = f.thin ? () => thinDrawing(sk, ev(f.thinT) || 2, f.thinSide) : null;
       let d1 = (f.end === "through" || f.end === "throughAll2") ? big : ev(f.depth);
       if (!(Math.abs(d1) > 1e-6)) throw new Error("Profondeur nulle");
       let tool;
-      if (f.end === "mid") tool = extrudeTool(sk, o0 + -d1 / 2, d1);
-      else if (f.end === "throughAll2") tool = extrudeTool(sk, o0 + -big, 2 * big);
+      if (f.end === "mid") tool = extrudeTool(sk, o0 + -d1 / 2, d1, prof);
+      else if (f.end === "throughAll2") tool = extrudeTool(sk, o0 + -big, 2 * big, prof);
       else {
-        tool = extrudeTool(sk, o0 + 0, sign * d1);
+        tool = extrudeTool(sk, o0 + 0, sign * d1, prof);
         if (f.dir2) {
           const d2 = f.end2 === "through" ? big : ev(f.depth2);
-          if (d2 > 0) tool = tool.fuse(extrudeTool(sk, o0 + 0, -sign * d2));
+          if (d2 > 0) tool = tool.fuse(extrudeTool(sk, o0 + 0, -sign * d2, prof));
         }
       }
-      if (f.draft && ev(f.draft) && f.end !== "mid") {
+      if (f.draft && ev(f.draft) && f.end !== "mid" && !f.thin) {
         // dépouille approximée : rétrécissement linéaire
         const d = regionOf(sk);
         const a = ev(f.draft) * Math.PI / 180;
@@ -411,12 +436,20 @@ function applyFeature0(f, st, ev, doc) {
     }
     case "hole": {
       if (!st.main) throw new Error("Aucun corps");
-      if (!f.points?.length) throw new Error("Aucune position de perçage");
+      let pts = f.points || [], hn = f.face?.n;
+      if (f.ptsSketch) {
+        const ps = sketchOf(st, f.ptsSketch);
+        pts = ps.entities.filter(e => e.t === "point" || (e.t === "circle" && f.useCircles)).map(e => to3D(ps.plane, e.t === "point" ? e.p : e.c));
+        hn = ps.plane.n;
+        if (f.face?.n && v3.dot(f.face.n, hn) < 0) hn = v3.mul(hn, -1);
+      }
+      if (!pts.length) throw new Error("Aucune position de perçage");
+      if (!hn) throw new Error("Choisissez la face à percer");
       const big = bigLength(st);
       const h = { kind: f.kind, d: ev(f.d), cbD: ev(f.cbD), cbH: ev(f.cbH), csD: ev(f.csD), csA: ev(f.csA) || 90, tip: f.tip, through: f.end === "through" };
       const depth = f.end === "through" ? big : ev(f.depth);
       let tool = null;
-      for (const p of f.points) { const t = holeTool(p, f.face.n, h, depth); tool = tool ? tool.fuse(t) : t; }
+      for (const p of pts) { const t = holeTool(p, hn, h, depth); tool = tool ? tool.fuse(t) : t; }
       applyOp(st, f, tool, "cut");
       break;
     }
@@ -491,6 +524,52 @@ function applyFeature0(f, st, ev, doc) {
       const sh = d.sketchOnPlane(rPlane(offsetPlane(sk.plane, off))).extrude((f.reverse && !f.mid) ? -W : W);
       applyOp(st, f, sh, "add");
       st.info[f.id] = { flat: g.flat, width: W, bends: g.flatBends, t, r, K };
+      break;
+    }
+    case "split": {
+      if (!st.main) throw new Error("Aucun corps");
+      const p = resolvePlane(f.plane || { kind: "std", std: "right" }, st);
+      const pl = offsetPlane(p, ev(f.offset) || 0);
+      const res = st.main.cutPlane(rPlane(pl), 0, f.flip ? "negative" : "positive");
+      if (!res) throw new Error("Le plan ne coupe pas le corps (ou tout est supprimé)");
+      st.main = res;
+      break;
+    }
+    case "movebody": {
+      const tf = s0 => { let s1 = s0.clone(); const o = f.center || [0, 0, 0];
+        if (ev(f.rx)) s1 = s1.rotate(ev(f.rx), o, [1, 0, 0]); if (ev(f.ry)) s1 = s1.rotate(ev(f.ry), o, [0, 1, 0]); if (ev(f.rz)) s1 = s1.rotate(ev(f.rz), o, [0, 0, 1]);
+        return s1.translate([ev(f.dx) || 0, ev(f.dy) || 0, ev(f.dz) || 0]); };
+      const n = f.copy ? Math.max(1, Math.round(ev(f.count) || 1)) : 1;
+      if (f.target === "weld") {
+        const src = st.bodies.filter(b => b.kind === "weld"); if (!src.length) throw new Error("Aucun élément mécano-soudé");
+        for (const b of src) { if (f.copy) { let cur = b.shape; for (let i = 0; i < n; i++) { cur = tf(cur); st.bodies.push({ ...b, shape: cur, feature: f.id }); } } else b.shape = tf(b.shape); }
+      } else {
+        if (!st.main) throw new Error("Aucun corps");
+        if (f.copy) { let cur = st.main, acc = st.main; for (let i = 0; i < n; i++) { cur = tf(cur); acc = acc.fuse(cur); } st.main = acc; }
+        else st.main = tf(st.main);
+      }
+      break;
+    }
+    case "part": {
+      if (!f.data) throw new Error("Aucune pièce choisie");
+      if ((doc._depth || 0) > 4) throw new Error("Insertion trop imbriquée");
+      const sub = typeof f.data === "string" ? JSON.parse(f.data) : f.data;
+      const sst = rebuild({ ...sub, _depth: (doc._depth || 0) + 1 });
+      const shapes = [sst.main, ...sst.bodies.map(b => b.shape)].filter(Boolean);
+      if (!shapes.length) throw new Error("La pièce insérée est vide");
+      const place = s0 => { let s1 = s0.clone();
+        if (ev(f.rx)) s1 = s1.rotate(ev(f.rx), [0, 0, 0], [1, 0, 0]); if (ev(f.ry)) s1 = s1.rotate(ev(f.ry), [0, 0, 0], [0, 1, 0]); if (ev(f.rz)) s1 = s1.rotate(ev(f.rz), [0, 0, 0], [0, 0, 1]);
+        return s1.translate([ev(f.x) || 0, ev(f.y) || 0, ev(f.z) || 0]); };
+      const n = Math.max(1, Math.round(ev(f.count) || 1));
+      for (let i = 0; i < n; i++) {
+        const off = [(ev(f.px) || 0) * i, (ev(f.py) || 0) * i, (ev(f.pz) || 0) * i];
+        for (const sh0 of shapes) {
+          const sh = place(sh0).translate(off);
+          if (f.merge) applyOp(st, f, sh, "add");
+          else st.bodies.push({ shape: sh, name: (f.name || "Pièce") + (n > 1 ? " #" + (i + 1) : ""), kind: "part", feature: f.id, color: f.color || "#c9a24a" });
+        }
+      }
+      st.info[f.id] = { name: sub.name, mass: massProps(sst, sub.material?.density ?? 7.85)?.mass * n || 0, material: sub.material?.name };
       break;
     }
     case "import": {

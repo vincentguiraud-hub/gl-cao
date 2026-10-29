@@ -1,6 +1,7 @@
 // G&L CAO 3D — interface principale
 import * as THREE from "three";
 import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
 import { initOCC, R } from "./occ.js";
 import { Viewer } from "./viewer.js";
 import { Sketcher, newId, entPoints } from "./sketcher.js";
@@ -8,7 +9,9 @@ import { rebuild, featureLabel, prepareImports, importCache, massProps, exportCo
 import { STD_PLANES, makeEval, v3, v2, planeFromNormal, planeY, to3D, to2D, circleFrom3 } from "./geom.js";
 import { PROFILE_FAMILIES, profileName } from "./profiles.js";
 import { icon } from "./icons.js";
-import { saveFile, saveZipped, sketchToDXF, flatPatternDXF, warmDownloads } from "./exporters.js";
+import { REL_LABELS } from "./solver.js";
+import { saveFile, saveZipped, sketchToDXF, flatPatternDXF, warmDownloads, toOBJ, toSTLAscii, toPLY, to3MF, svgDrawingToDXF, faceToDXF } from "./exporters.js";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { buildDrawing, SCALES, scaleLabel } from "./drawing.js";
 
 const $ = s => document.querySelector(s);
@@ -107,7 +110,7 @@ function recompute(state) {
 }
 
 // ---------------- Arbre de création
-const TYPE_ICON = { sketch: "sketch", extrude: "extrude", cut: "cut", revolve: "revolve", revcut: "revcut", fillet: "fillet", chamfer: "chamfer", shell: "shell", draft: "draft", hole: "hole", lpattern: "lpattern", cpattern: "cpattern", mirror: "mirror", plane: "plane", loft: "loft", sweep: "sweep", weld: "weld", sheet: "sheet", import: "import" };
+const TYPE_ICON = { split: "section", movebody: "move", part: "part", sketch: "sketch", extrude: "extrude", cut: "cut", revolve: "revolve", revcut: "revcut", fillet: "fillet", chamfer: "chamfer", shell: "shell", draft: "draft", hole: "hole", lpattern: "lpattern", cpattern: "cpattern", mirror: "mirror", plane: "plane", loft: "loft", sweep: "sweep", weld: "weld", sheet: "sheet", import: "import" };
 function renderTree() {
   const t = $("#tree");
   const rb = doc.rollback ?? doc.features.length;
@@ -171,7 +174,7 @@ function featureMenu(id, x, y) {
     { label: "Éditer la fonction", icon: "sketch", click: () => editFeature(id) },
     { label: "Renommer", click: () => renameFeature(f) },
     { label: f.suppressed ? "Réactiver" : "Supprimer temporairement (désactiver)", click: () => commit(() => f.suppressed = !f.suppressed) },
-    ...(["weld", "plane"].includes(f.type) ? [{ label: f.hidden ? "Afficher" : "Masquer", icon: f.hidden ? "eye" : "hide", click: () => commit(() => f.hidden = !f.hidden) }] : []),
+    ...(["weld", "plane", "part"].includes(f.type) ? [{ label: f.hidden ? "Afficher" : "Masquer", icon: f.hidden ? "eye" : "hide", click: () => commit(() => f.hidden = !f.hidden) }] : []),
     { label: "Placer la barre de reprise avant", click: () => commit(() => doc.rollback = idx) },
     { label: "Ramener la barre à la fin", click: () => commit(() => doc.rollback = null) },
     "-",
@@ -204,7 +207,7 @@ function deleteFeature(id) {
   else go();
 }
 function nextName(type) {
-  const base = { sketch: "Esquisse", extrude: "Bossage-Extru", cut: "Enlèv.-Extru", revolve: "Bossage-Révol", revcut: "Enlèv.-Révol", fillet: "Congé", chamfer: "Chanfrein", shell: "Coque", draft: "Dépouille", hole: "Perçage", lpattern: "RépétLinéaire", cpattern: "RépétCirculaire", mirror: "Symétrie", plane: "Plan", loft: "Lissage", sweep: "Balayage", weld: "Mécano-soudé", sheet: "Tôle-pliée", import: "Importé" }[type] || type;
+  const base = { sketch: "Esquisse", extrude: "Bossage-Extru", cut: "Enlèv.-Extru", revolve: "Bossage-Révol", revcut: "Enlèv.-Révol", fillet: "Congé", chamfer: "Chanfrein", shell: "Coque", draft: "Dépouille", hole: "Perçage", lpattern: "RépétLinéaire", cpattern: "RépétCirculaire", mirror: "Symétrie", plane: "Plan", split: "Coupe", movebody: "Déplacer-Corps", part: "Pièce", loft: "Lissage", sweep: "Balayage", weld: "Mécano-soudé", sheet: "Tôle-pliée", import: "Importé" }[type] || type;
   let n = 1; while (doc.features.some(f => f.name === base + n)) n++;
   return base + n;
 }
@@ -212,7 +215,7 @@ function nextName(type) {
 // ---------------- Barre de commandes
 const SKETCH_TOOLS = [["select", "Sélection"], ["line", "Ligne"], ["rect", "Rectangle"], ["crect", "Rectangle centré"], ["circle", "Cercle"], ["arc", "Arc 3 points"], ["carc", "Arc par centre"], ["tarc", "Arc tangent"], ["poly", "Polygone"], ["slot", "Rainure"], ["centerline", "Axe de construction"], ["point", "Point"], "|", ["dim", "Cotation"], ["sfillet", "Congé d'esquisse"], ["trim", "Ajuster"], ["move", "Déplacer / copier"], ["rotate", "Pivoter"], ["offset", "Décaler entités"], ["smirror", "Symétrie d'entités"], ["spattern", "Répétition d'entités"], ["convert", "Convertir entités"], "|", ["exit", "Quitter l'esquisse"]];
 const TABS = {
-  fonctions: { label: "Fonctions", tools: [["extrude", "Bossage extrudé"], ["revolve", "Bossage avec révolution"], ["sweep", "Balayage"], ["loft", "Lissage"], "|", ["cut", "Enlèvement extrudé"], ["revcut", "Enlèvement avec révolution"], ["hole", "Assistance perçage"], "|", ["fillet", "Congé"], ["chamfer", "Chanfrein"], ["shell", "Coque"], ["draft", "Dépouille"], "|", ["lpattern", "Répétition linéaire"], ["cpattern", "Répétition circulaire"], ["mirror", "Symétrie"], "|", ["plane", "Plan de référence"], ["import", "Importer STEP / STL"]] },
+  fonctions: { label: "Fonctions", tools: [["extrude", "Bossage extrudé"], ["revolve", "Bossage avec révolution"], ["sweep", "Balayage"], ["loft", "Lissage"], "|", ["cut", "Enlèvement extrudé"], ["revcut", "Enlèvement avec révolution"], ["hole", "Assistance perçage"], "|", ["fillet", "Congé"], ["chamfer", "Chanfrein"], ["shell", "Coque"], ["draft", "Dépouille"], "|", ["lpattern", "Répétition linéaire"], ["cpattern", "Répétition circulaire"], ["mirror", "Symétrie"], "|", ["plane", "Plan de référence"], "|", ["split", "Couper par un plan"], ["movebody", "Déplacer / copier le corps"], ["part", "Insérer une pièce"], ["import", "Importer STEP / STL"]] },
   esquisse: { label: "Esquisse", tools: [["sketch", "Esquisse"]] },
   tolerie: { label: "Tôlerie", tools: [["sheet", "Tôle pliée (profil ouvert)"], ["plate", "Tôle de base (plaque)"], ["flat", "Mise à plat / DXF"]] },
   mecano: { label: "Mécano-soudé", tools: [["weld", "Élément mécano-soudé"], ["cutlist", "Liste de débit"]] },
@@ -250,7 +253,8 @@ function command(k) {
   switch (k) {
     case "sketch": return startSketch();
     case "extrude": case "cut": case "revolve": case "revcut": case "fillet": case "chamfer": case "shell": case "draft": case "hole":
-    case "lpattern": case "cpattern": case "mirror": case "plane": case "loft": case "sweep": case "weld": case "sheet": return startFeature(k);
+    case "lpattern": case "cpattern": case "mirror": case "plane": case "loft": case "sweep": case "weld": case "sheet": case "split": case "movebody": return startFeature(k);
+    case "part": return pickFile(".json,.glcad", async file => { try { const d = JSON.parse(await file.text()); if (d.app !== "glcad") throw new Error("Ce n'est pas un projet G&L CAO"); startFeature("part", { data: d, partName: d.name || file.name }); } catch (e) { toast("Insertion impossible : " + e.message, true); } });
     case "plate": return startFeature("extrude", { depth: 3, end: "blind", namePrefix: "Tôle-base" });
     case "import": return pickFile(".step,.stp,.stl", importFile);
     case "flat": { const s = doc.features.filter(f => f.type === "sheet"); if (!s.length) return toast("Aucune tôle pliée dans la pièce", true); return showFlat((s.find(f => f.id === treeSel) || s[s.length - 1]).id); }
@@ -357,6 +361,7 @@ function contextMenuView(e) {
   const items = [];
   if (h && (h.kind === "plane" || (h.kind === "face" && isPlanarHit(h)))) items.push({ label: "Esquisse sur cette face / ce plan", icon: "sketch", click: () => startSketch(refFromHit(h)) });
   if (h?.kind === "face") items.push({ label: "Normal à", icon: "normal", click: () => { selection = [h]; normalToSelection(); } });
+  if (h?.kind === "face" && isPlanarHit(h)) items.push({ label: "Exporter cette face en DXF (découpe)", icon: "export", click: () => { const f = bodiesOf(st)[h.body].shape.faces[h.face]; saveFile(`${doc.name} - face.dxf`, faceToDXF(f, planeFromNormal(f.center.toTuple(), f.normalAt().toTuple()), to2D), toast); } });
   if (h?.kind === "edge") items.push({ label: "Congé sur cette arête", icon: "fillet", click: () => { selection = [h]; startFeature("fillet"); } });
   items.push({ label: "Zoom au mieux", icon: "fit", click: () => viewer.zoomFit() }, { label: "Vue isométrique", icon: "iso", click: () => hudAction("iso") });
   popupMenu(e.clientX, e.clientY, items);
@@ -419,8 +424,8 @@ function enterSketch(f, isNew, idx) {
   viewer.setSketchControls();
   viewer.setView(plane.n, planeY(plane), true, plane.o);
   sk = new Sketcher(viewer, plane, f.entities, {
-    onSketchChange: () => renderSketchPM(), onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim, editDistance, toast,
-  });
+    onSketchChange: () => renderSketchPM(), onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim, editDistance, editConstraintDim, toast,
+  }, f.constraints);
   sk.showGrid = true;
   sk.setTool("line");
   curTab = "esquisse"; renderTabs();
@@ -432,13 +437,13 @@ function enterSketch(f, isNew, idx) {
 }
 function exitSketch(save) {
   if (!sk) return;
-  const ents = sk.ents; sk.destroy(); sk = null;
+  const ents = sk.ents, consSaved = sk.cons; sk.destroy(); sk = null;
   const { f, isNew, idx, prevRollback } = skCtx; skCtx = null;
   mode = "idle"; viewer.setIdleControls(); $("#confirm").style.display = "none"; hidePM();
   doc.rollback = prevRollback;
   if (save && (ents.length || !isNew)) {
     commit(() => {
-      f.entities = ents;
+      f.entities = ents; f.constraints = consSaved;
       if (isNew) { doc.features.splice(idx, 0, f); if (doc.rollback != null) doc.rollback++; }
       else { const i = doc.features.findIndex(q => q.id === f.id); doc.features[i] = f; }
     });
@@ -481,6 +486,7 @@ function renderSketchPM() {
   if (sk.pendingOp === "pattern") h += `<div class="grp"><h4>Répétition linéaire d'entités</h4><div class="fld"><label>Pas X</label><input type="text" id="opX1" value="50"></div><div class="fld"><label>Pas Y</label><input type="text" id="opY1" value="0"></div><div class="fld"><label>Nombre</label><input type="text" id="opN" value="3"></div><div class="btnrow"><button class="btn pri" id="opGo">Appliquer</button><button class="btn" id="opX">Fermer</button></div></div>`;
   if (selEnts.length === 1) h += entityEditor(selEnts[0]);
   else if (selEnts.length > 1) h += `<div class="grp"><div class="hint">${selEnts.length} entités sélectionnées. Avec un axe de construction dans la sélection, utilisez « Symétrie d'entités ».</div><div class="btnrow"><button class="btn" id="oCons">Basculer construction</button></div></div>`;
+  h += relationsPM(selEnts);
   const cnt = sk.ents.length;
   h += `<div class="grp"><h4>Esquisse</h4><div class="hint">${cnt} entité(s). Contours fermés → volumes ; lignes ouvertes → tôle pliée / mécano-soudé / trajectoire.</div><div class="btnrow"><button class="btn" id="oDxf">Exporter en DXF</button></div></div>`;
   showPM(h);
@@ -504,6 +510,7 @@ function renderSketchPM() {
   };
   const ox = $("#opX"); if (ox) ox.onclick = () => { sk.pendingOp = null; renderSketchPM(); };
   bindEntityEditor(selEnts[0]);
+  bindRelationsPM(selEnts);
 }
 function entityEditor(e) {
   const F = (k, l, v) => `<div class="fld"><label>${l}</label><input type="text" data-k="${k}" value="${fmt(v, 4)}"></div>`;
@@ -520,6 +527,63 @@ function entityEditor(e) {
   else if (e.t === "point") h += F("px", "X", e.p[0]) + F("py", "Y", e.p[1]);
   return h + "</div>";
 }
+// ---------- Relations d'esquisse
+function relationsPM(selEnts) {
+  const pts = [...sk.selPts];
+  const L = selEnts.filter(e => e.t === "line"), Ci = selEnts.filter(e => e.t === "circle" || e.t === "arc");
+  const btns = [];
+  const B = (k, lab) => btns.push(`<button class="btn" data-rel="${k}">${lab}</button>`);
+  if (!pts.length) {
+    if (L.length === 1 && selEnts.length === 1) { B("h", "Horizontale"); B("v", "Verticale"); B("fixE", "Fixe"); }
+    if (L.length === 2 && selEnts.length === 2) { B("par", "Parallèle"); B("perp", "Perpendiculaire"); B("equal", "Égale"); B("colin", "Colinéaire"); B("angle", "Angle…"); }
+    if (L.length >= 3 && L.length === selEnts.length) { B("equalAll", "Égales"); B("parAll", "Parallèles"); }
+    if (L.length === 1 && Ci.length === 1 && selEnts.length === 2) B("tan", "Tangente");
+    if (Ci.length === 2 && selEnts.length === 2) { B("equal", "Égale"); B("conc", "Concentrique"); B("tan", "Tangente"); }
+    if (Ci.length >= 3 && Ci.length === selEnts.length) B("equalAll", "Égales");
+    if (Ci.length === 1 && selEnts.length === 1) B("fixE", "Fixe");
+  } else {
+    if (pts.length === 1 && !selEnts.length) { B("fixP", "Fixe"); B("origin", "Sur l'origine"); }
+    if (pts.length === 2 && !selEnts.length) { B("coinc", "Coïncidents"); B("hpts", "Horizontaux"); B("vpts", "Verticaux"); }
+    if (pts.length === 1 && L.length === 1 && selEnts.length === 1) { B("onLine", "Sur la ligne"); B("mid", "Point milieu"); }
+    if (pts.length === 1 && Ci.length === 1 && selEnts.length === 1) B("onCircle", "Sur le cercle");
+  }
+  const ids = new Set(selEnts.map(e => e.id)); pts.forEach(k => ids.add(k.split(":")[0]));
+  const rel = sk.cons.map((c, i) => [c, i]).filter(([c]) => [c.e, c.e1, c.e2, c.p?.e, c.p1?.e, c.p2?.e].some(x => ids.has(x)));
+  const dof = sk.dof();
+  let h = `<div class="grp"><h4>Relations et cotes</h4>`;
+  h += `<div class="hint" style="color:${dof === 0 && sk.cons.length ? "#0f8a3c" : "#1f5fbf"}">${!sk.cons.length ? "Aucune relation : esquisse libre (bleue)." : dof === 0 ? "✔ Esquisse totalement contrainte (noire)." : dof > 0 ? `Esquisse sous-contrainte : ${dof} degré(s) de liberté (bleue).` : ""}</div>`;
+  if (selEnts.length || pts.length) h += btns.length ? `<div class="btnrow">${btns.join("")}</div>` : `<div class="hint">Aucune relation possible pour cette sélection. Sélectionnez 1 ou 2 entités, ou des points (clic sur une extrémité), Maj+clic pour ajouter.</div>`;
+  else h += `<div class="hint">Sélectionnez des entités ou des points (clic sur une extrémité), Maj+clic pour en ajouter, pour leur donner une relation. Outil Cotation : clic sur une entité ou sur 2 points.</div>`;
+  if (rel.length) h += `<div class="sellist" style="margin-top:6px">${rel.map(([c, i]) => `<div class="it"><span>${REL_LABELS[c.t] || c.t}${c.val != null ? " = " + fmt(c.val, 3) + (c.t === "angle" ? "°" : "") : ""}</span><button data-delrel="${i}" title="Supprimer">✕</button></div>`).join("")}</div>`;
+  h += `<div class="fld chk"><input type="checkbox" id="oRels" ${sk.showRels ? "checked" : ""}><label for="oRels">Afficher les symboles de relations</label></div>`;
+  h += `<div class="fld chk"><input type="checkbox" id="oAuto" ${sk.autoRel ? "checked" : ""}><label for="oAuto">Relations automatiques (horizontal / vertical, rectangles)</label></div>`;
+  return h + `</div>`;
+}
+function bindRelationsPM(selEnts) {
+  const P = $("#pm");
+  const pts = [...sk.selPts].map(k => { const [e, kk] = k.split(":"); return { e, k: kk }; });
+  P.querySelectorAll("[data-delrel]").forEach(b => b.onclick = () => sk.removeConstraint(+b.dataset.delrel));
+  const r = $("#oRels"); if (r) r.onchange = () => { sk.showRels = r.checked; viewer.render(); };
+  const au = $("#oAuto"); if (au) au.onchange = () => { sk.autoRel = au.checked; };
+  P.querySelectorAll("[data-rel]").forEach(b => b.onclick = () => {
+    const k = b.dataset.rel; const [e1, e2] = selEnts;
+    const add = c => { if (!sk.addConstraint(c)) toast("Relation impossible : conflit avec les relations ou cotes existantes", true); };
+    switch (k) {
+      case "h": case "v": add({ t: k, e: e1.id }); break;
+      case "par": case "perp": case "equal": case "colin": case "conc": add({ t: k, e1: e1.id, e2: e2.id }); break;
+      case "tan": { const ln = selEnts.find(x => x.t === "line"); const ci = selEnts.filter(x => x !== ln); const o = ln ? { t: "tan", e1: ln.id, e2: ci[0].id } : { t: "tan", e1: e1.id, e2: e2.id }; if (!ln) { const c1 = e1.t === "circle" ? e1 : circleFrom3(e1.a, e1.m, e1.b), c2 = e2.t === "circle" ? e2 : circleFrom3(e2.a, e2.m, e2.b); const d = v2.dist(c1.c, c2.c); o.inner = Math.abs(d - Math.abs(c1.r - c2.r)) < Math.abs(d - (c1.r + c2.r)); } add(o); break; }
+      case "equalAll": case "parAll": { sk.snapshot(); const t = k === "equalAll" ? "equal" : "par"; for (let i = 1; i < selEnts.length; i++) sk.cons.push({ t, e1: selEnts[0].id, e2: selEnts[i].id }); if (!sk.solve()) { sk.undo(); toast("Relation impossible (conflit)", true); } else sk.changed(); break; }
+      case "fixE": { sk.snapshot(); for (const kk of (e1.t === "line" ? ["a", "b"] : e1.t === "circle" ? ["c"] : ["a", "b", "m"])) sk.cons.push({ t: "fix", p: { e: e1.id, k: kk } }); if (e1.t === "circle") sk.cons.push({ t: "dia", e: e1.id, val: 2 * e1.r }); sk.changed(); break; }
+      case "fixP": add({ t: "fix", p: pts[0] }); break;
+      case "origin": { sk.snapshot(); const en = sk.ents.find(x => x.id === pts[0].e); import_movePointAll(sk.ents, [...en[pts[0].k]], [0, 0]); if (!sk.solve()) { sk.undo(); toast("Impossible (conflit)", true); } else sk.changed(); break; }
+      case "coinc": { sk.snapshot(); const a = sk.ents.find(x => x.id === pts[0].e), bb = sk.ents.find(x => x.id === pts[1].e); import_movePointAll(sk.ents, [...bb[pts[1].k]], [...a[pts[0].k]]); if (!sk.solve()) { sk.undo(); toast("Impossible (conflit)", true); } else { sk.selPts.clear(); sk.changed(); } break; }
+      case "hpts": case "vpts": add({ t: k, p1: pts[0], p2: pts[1] }); break;
+      case "onLine": case "mid": add({ t: k, p: pts[0], e: e1.id }); break;
+      case "onCircle": add({ t: k, p: pts[0], e: e1.id }); break;
+      case "angle": { const d1 = v2.sub(e1.b, e1.a), d2 = v2.sub(e2.b, e2.a); const cur = Math.atan2(Math.abs(v2.cross(d1, d2)), v2.dot(d1, d2)) * 180 / Math.PI; const rr = b.getBoundingClientRect(); dimPopup({ clientX: rr.right + 280, clientY: rr.top }, "∠", cur, v => sk.setDim(c => c.t === "angle" && c.e1 === e1.id && c.e2 === e2.id, { t: "angle", e1: e1.id, e2: e2.id, val: v })); break; }
+    }
+  });
+}
 function bindEntityEditor(e) {
   if (!e) return;
   const E = ev();
@@ -528,7 +592,8 @@ function bindEntityEditor(e) {
     inp.onchange = () => {
       const v = E(inp.value); sk.snapshot();
       const k = inp.dataset.k;
-      const mv = (key, np) => { const old = [...e[key]]; import_movePointAll(sk.ents, old, np); };
+      const keep = [];
+      const mv = (key, np) => { const old = [...e[key]]; import_movePointAll(sk.ents, old, np); keep.push([e, key]); };
       switch (k) {
         case "ax": mv("a", [v, e.a[1]]); break; case "ay": mv("a", [e.a[0], v]); break;
         case "bx": mv("b", [v, e.b[1]]); break; case "by": mv("b", [e.b[0], v]); break;
@@ -542,6 +607,7 @@ function bindEntityEditor(e) {
         case "sw": if (v > 0) e.r = v / 2; break;
         case "px": e.p = [v, e.p[1]]; break; case "py": e.p = [e.p[0], v]; break;
       }
+      if (sk.cons.length) { const r = sk.solve({ keep, force: false }); if (!r) { toast("Modification impossible : en conflit avec les relations / cotes de l'esquisse", true); sk.undo(); return; } }
       sk.changed();
     };
   });
@@ -554,39 +620,46 @@ function bindEntityEditor(e) {
   });
 }
 import { movePointAll as import_movePointAll } from "./sketcher.js";
-function editDistance(s, p1, p2, evt) {
+function dimPopup(evt, label, value, onOk, extraHtml = "", onDelete = null) {
   document.querySelectorAll(".dimpop").forEach(x => x.remove());
-  const dx = Math.abs(p2[0] - p1[0]), dy = Math.abs(p2[1] - p1[1]);
-  let mode = dy < 1e-6 ? "h" : dx < 1e-6 ? "v" : "a";
   const pop = document.createElement("div"); pop.className = "dimpop";
   const r = viewer.container.getBoundingClientRect();
-  pop.style.left = Math.min(evt.clientX - r.left + 8, r.width - 280) + "px"; pop.style.top = (evt.clientY - r.top + 8) + "px";
-  const cur = () => mode === "h" ? dx : mode === "v" ? dy : v2.dist(p1, p2);
-  pop.innerHTML = `<select><option value="a">Alignée</option><option value="h">Horizontale</option><option value="v">Verticale</option></select><input type="text"><button class="ok">✓</button><button class="no">✕</button>`;
-  const sel = pop.querySelector("select"), inp = pop.querySelector("input"); sel.value = mode; inp.value = fmt(cur(), 4);
-  sel.onchange = () => { mode = sel.value; inp.value = fmt(cur(), 4); inp.focus(); inp.select(); };
-  viewer.container.appendChild(pop); setTimeout(() => { inp.focus(); inp.select(); }, 30);
-  const ok = () => { const v = ev()(inp.value); if (v >= 0) { s.snapshot(); s.setDistance(p1, p2, v, mode); s.changed(); } pop.remove(); };
-  pop.querySelector(".ok").onclick = ok; pop.querySelector(".no").onclick = () => pop.remove();
-  inp.onkeydown = x => { x.stopPropagation(); if (x.key === "Enter") ok(); if (x.key === "Escape") pop.remove(); };
-}
-function editDim(s, e, evt) {
-  document.querySelectorAll(".dimpop").forEach(x => x.remove());
-  let val, apply;
-  if (e.t === "line") { val = v2.dist(e.a, e.b); apply = v => s.setLineLength(e, v); }
-  else if (e.t === "circle") { val = 2 * e.r; apply = v => e.r = v / 2; }
-  else if (e.t === "arc") { const c = circleFrom3(e.a, e.m, e.b); val = c?.r || 0; apply = v => s.setArcRadius(e, v); }
-  else if (e.t === "slot") { val = v2.dist(e.a, e.b); apply = v => { const d = v2.norm(v2.sub(e.b, e.a)); e.b = v2.add(e.a, v2.mul(d, v)); }; }
-  else return;
-  const pop = document.createElement("div"); pop.className = "dimpop";
-  const r = viewer.container.getBoundingClientRect();
-  pop.style.left = Math.min(evt.clientX - r.left + 8, r.width - 200) + "px"; pop.style.top = (evt.clientY - r.top + 8) + "px";
-  pop.innerHTML = `<span>${e.t === "circle" ? "Ø" : e.t === "arc" ? "R" : "L"}</span><input type="text" value="${fmt(val, 4)}"><button class="ok">✓</button><button class="no">✕</button>`;
+  pop.style.left = Math.max(4, Math.min(evt.clientX - r.left + 8, r.width - 300)) + "px"; pop.style.top = Math.max(4, Math.min(evt.clientY - r.top + 8, r.height - 50)) + "px";
+  pop.innerHTML = `${extraHtml}<span>${label}</span><input type="text" value="${fmt(value, 4)}"><button class="ok" title="Valider">✓</button>${onDelete ? '<button class="del" title="Supprimer la cote">🗑</button>' : ""}<button class="no" title="Annuler">✕</button>`;
   viewer.container.appendChild(pop);
   const inp = pop.querySelector("input"); setTimeout(() => { inp.focus(); inp.select(); }, 30);
-  const ok = () => { const v = ev()(inp.value); if (v > 0) { s.snapshot(); apply(v); s.changed(); } pop.remove(); };
+  const ok = () => { const v = ev()(inp.value); pop.remove(); onOk(v, pop); };
   pop.querySelector(".ok").onclick = ok; pop.querySelector(".no").onclick = () => pop.remove();
+  if (onDelete) pop.querySelector(".del").onclick = () => { pop.remove(); onDelete(); };
   inp.onkeydown = x => { x.stopPropagation(); if (x.key === "Enter") ok(); if (x.key === "Escape") pop.remove(); };
+  return pop;
+}
+function editDistance(s, A, B, evt) {
+  const p1 = A.p, p2 = B.p;
+  const dx = Math.abs(p2[0] - p1[0]), dy = Math.abs(p2[1] - p1[1]);
+  let mode = dy < 1e-6 ? "h" : dx < 1e-6 ? "v" : "a";
+  const cur = () => mode === "h" ? dx : mode === "v" ? dy : v2.dist(p1, p2);
+  const pop = dimPopup(evt, "", cur(), v => {
+    if (!(v >= 0)) return;
+    const c = { t: "dist", mode, val: v }; if (A.ref) c.p1 = A.ref; if (B.ref) c.p2 = B.ref;
+    if (!c.p1 && !c.p2) return;
+    if (!c.p1) { c.p1 = c.p2; delete c.p2; } // l'origine est implicite
+    const same = x => x.t === "dist" && JSON.stringify(x.p1) === JSON.stringify(c.p1) && JSON.stringify(x.p2) === JSON.stringify(c.p2) && x.mode === c.mode;
+    s.setDim(same, c);
+  }, `<select><option value="a">Alignée</option><option value="h">Horizontale</option><option value="v">Verticale</option></select>`);
+  const sel = pop.querySelector("select"), inp = pop.querySelector("input"); sel.value = mode;
+  sel.onchange = () => { mode = sel.value; inp.value = fmt(cur(), 4); inp.focus(); inp.select(); };
+}
+function editConstraintDim(s, ci, evt) {
+  const c = s.cons[ci]; if (!c) return;
+  const label = { len: "L", rad: "R", dia: "Ø", dist: "D", angle: "∠" }[c.t] || "";
+  dimPopup(evt, label, c.val, v => { if (v > 0 || (c.t === "dist" && v >= 0) || c.t === "angle") s.setDim(x => x === c, { val: v }); }, "", () => s.removeConstraint(s.cons.indexOf(c)));
+}
+function editDim(s, e, evt) {
+  if (e.t === "line") dimPopup(evt, "L", v2.dist(e.a, e.b), v => { if (v > 0) s.setDim(c => c.t === "len" && c.e === e.id, { t: "len", e: e.id, val: v }); });
+  else if (e.t === "circle") dimPopup(evt, "Ø", 2 * e.r, v => { if (v > 0) s.setDim(c => (c.t === "dia" || c.t === "rad") && c.e === e.id, { t: "dia", e: e.id, val: v }); });
+  else if (e.t === "arc") { const c0 = circleFrom3(e.a, e.m, e.b); dimPopup(evt, "R", c0?.r || 0, v => { if (v > 0) s.setDim(c => (c.t === "rad" || c.t === "dia") && c.e === e.id, { t: "rad", e: e.id, val: v }); }); }
+  else if (e.t === "slot") dimPopup(evt, "L", v2.dist(e.a, e.b), v => { if (v > 0) { s.snapshot(); const d = v2.norm(v2.sub(e.b, e.a)); e.b = v2.add(e.a, v2.mul(d, v)); s.solve({ force: true }); s.changed(); } });
 }
 
 // ---------------- PropertyManager (fonctions)
@@ -618,6 +691,9 @@ function startFeature(type, extra = {}) {
     cpattern: { features: [], axis: "Y", count: 6, angle: 360, rev: false },
     mirror: { body: false, features: [], plane: { kind: "std", std: "right" } },
     plane: { base: { kind: "std", std: "front" }, offset: 50, angle: 0 },
+    split: { plane: { kind: "std", std: "right" }, offset: 0, flip: false },
+    movebody: { target: "main", dx: 100, dy: 0, dz: 0, rx: 0, ry: 0, rz: 0, copy: false, count: 1 },
+    part: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, count: 1, px: 0, py: 0, pz: 0, merge: false, color: "#c9a24a" },
     loft: { sketches: [], op: "add", ruled: false },
     sweep: { profile: "", path: "", op: "add" },
     weld: { sketch: defaultSketch(idx), family: "tube_carre", size: "40x40x2", corner: "miter", rot: 0, align: "center", offX: 0, offY: 0, trimT: true, color: "#8f9ba8" },
@@ -625,6 +701,7 @@ function startFeature(type, extra = {}) {
   }[type] || {};
   Object.assign(f, JSON.parse(JSON.stringify(D)));
   if (extra.depth) f.depth = extra.depth;
+  if (extra.data) { f.data = extra.data; f.name = extra.partName || f.name; }
   // reprendre la sélection courante
   const sh = st && bodiesOf(st);
   if ((type === "fillet" || type === "chamfer") && selection.length) f.edges = selection.filter(s => s.kind === "edge").map(s => ({ p: s.p }));
@@ -650,6 +727,7 @@ function pmSpec(f) {
     case "extrude": case "cut":
       G.push({ t: "Esquisse", f: [{ k: "sketch", l: "Esquisse", type: "select", o: sks }, { k: "startOffset", l: "Décalage du départ (mm)", type: "num" }] });
       G.push({ t: "Direction 1", f: [{ k: "end", l: "Condition de fin", type: "select", o: endOpts }, ...(f.end === "blind" || f.end === "mid" ? [{ k: "depth", l: "Profondeur (mm)", type: "num" }] : []), { k: "reverse", l: "Inverser la direction", type: "check" }, ...(f.type === "extrude" && f.end === "blind" ? [{ k: "draft", l: "Dépouille (°)", type: "num" }] : [])] });
+      G.push({ t: "Paroi mince", f: [{ k: "thin", l: "Fonction mince (épaissir les lignes)", type: "check" }, ...(f.thin ? [{ k: "thinT", l: "Épaisseur (mm)", type: "num" }, { k: "thinSide", l: "Côté", type: "select", o: [["mid", "Centrée"], ["left", "Côté gauche"], ["right", "Côté droit"]] }] : [])] });
       if (f.end === "blind" || f.end === "through") G.push({ t: "Direction 2", f: [{ k: "dir2", l: "Activer la direction 2", type: "check" }, ...(f.dir2 ? [{ k: "end2", l: "Condition de fin", type: "select", o: [["blind", "Borgne"], ["through", "À travers tout"]] }, ...(f.end2 === "blind" ? [{ k: "depth2", l: "Profondeur (mm)", type: "num" }] : [])] : [])] });
       break;
     case "revolve": case "revcut": {
@@ -667,7 +745,7 @@ function pmSpec(f) {
       const stdO = Object.keys(HOLE_STD).map(k => [k, k]);
       G.push({ t: "Type de trou", f: [{ k: "kind", l: "Type", type: "select", o: [["simple", "Perçage simple"], ["cbore", "Lamage (vis CHC)"], ["csink", "Fraisure (vis FHC)"]] }, { k: "std", l: "Taille", type: "select", o: [["", "Personnalisée"], ...stdO] }, { k: "usage", l: "Usage", type: "select", o: [["clear", "Passage de vis (normal)"], ["tap", "Avant-trou de taraudage"]] }, { k: "d", l: "Diamètre (mm)", type: "num" }, ...(f.kind === "cbore" ? [{ k: "cbD", l: "Ø lamage", type: "num" }, { k: "cbH", l: "Prof. lamage", type: "num" }] : []), ...(f.kind === "csink" ? [{ k: "csD", l: "Ø fraisure", type: "num" }, { k: "csA", l: "Angle fraisure (°)", type: "num" }] : [])] });
       G.push({ t: "Condition de fin", f: [{ k: "end", l: "Fin", type: "select", o: [["through", "À travers tout"], ["blind", "Borgne"]] }, ...(f.end === "blind" ? [{ k: "depth", l: "Profondeur (mm)", type: "num" }, { k: "tip", l: "Pointe de foret 118°", type: "check" }] : [])] });
-      G.push({ t: "Positions", f: [{ k: "points", l: "Positions", type: "points" }] });
+      G.push({ t: "Positions", f: [{ k: "ptsSketch", l: "Depuis une esquisse", type: "select", o: [["", "Non – cliquer sur la face"], ...sks] }, ...(f.ptsSketch ? [{ k: "useCircles", l: "Utiliser aussi les centres de cercles", type: "check" }, { type: "info", html: "Chaque point d'esquisse (outil Point) devient un perçage, perpendiculaire au plan de l'esquisse." }] : [{ k: "points", l: "Positions", type: "points" }])] });
       break;
     }
     case "lpattern":
@@ -686,6 +764,17 @@ function pmSpec(f) {
     case "plane":
       G.push({ t: "Référence", f: [{ k: "base", l: "Plan / face de base", type: "plane", o: [...planesOpt, ...(f.base?.kind === "face" ? [["face", "Face sélectionnée"]] : [])] }, { k: "offset", l: "Décalage (mm)", type: "num" }, { k: "angle", l: "Angle (°) autour de X du plan", type: "num" }] });
       break;
+    case "split": G.push({ t: "Plan de coupe", f: [{ k: "plane", l: "Plan", type: "plane", o: planesOpt }, { k: "offset", l: "Décalage (mm)", type: "num" }, { k: "flip", l: "Garder l'autre côté", type: "check" }] }); break;
+    case "movebody":
+      G.push({ t: "Corps", f: [{ k: "target", l: "Corps à déplacer", type: "select", o: [["main", "Corps principal"], ["weld", "Éléments mécano-soudés"]] }, { k: "copy", l: "Copier (garder l'original)", type: "check" }, ...(f.copy ? [{ k: "count", l: "Nombre de copies", type: "num" }] : [])] });
+      G.push({ t: "Translation", f: [{ k: "dx", l: "ΔX (mm)", type: "num" }, { k: "dy", l: "ΔY (mm)", type: "num" }, { k: "dz", l: "ΔZ (mm)", type: "num" }] });
+      G.push({ t: "Rotation autour de l'origine", f: [{ k: "rx", l: "Autour de X (°)", type: "num" }, { k: "ry", l: "Autour de Y (°)", type: "num" }, { k: "rz", l: "Autour de Z (°)", type: "num" }] });
+      break;
+    case "part":
+      G.push({ t: "Pièce", f: [{ type: "info", html: `Pièce : <b>${esc(f.data?.name || "?")}</b> (${(f.data?.features || []).length} fonctions). Pour la modifier, ouvrez son projet, modifiez-la puis réinsérez-la.` }, { k: "merge", l: "Fusionner au corps principal", type: "check" }, { k: "color", l: "Couleur", type: "color" }] });
+      G.push({ t: "Position", f: [{ k: "x", l: "X (mm)", type: "num" }, { k: "y", l: "Y (mm)", type: "num" }, { k: "z", l: "Z (mm)", type: "num" }, { k: "rx", l: "Rotation X (°)", type: "num" }, { k: "ry", l: "Rotation Y (°)", type: "num" }, { k: "rz", l: "Rotation Z (°)", type: "num" }] });
+      G.push({ t: "Répétition", f: [{ k: "count", l: "Nombre d'exemplaires", type: "num" }, { k: "px", l: "Pas X (mm)", type: "num" }, { k: "py", l: "Pas Y (mm)", type: "num" }, { k: "pz", l: "Pas Z (mm)", type: "num" }] });
+      break;
     case "loft": G.push({ t: "Profils (dans l'ordre)", f: [{ k: "sketches", l: "Esquisses", type: "multisketch" }, { k: "op", l: "Opération", type: "select", o: [["add", "Bossage"], ["cut", "Enlèvement"]] }, { k: "ruled", l: "Surfaces réglées (droites)", type: "check" }] }); break;
     case "sweep": G.push({ t: "Profil et trajectoire", f: [{ k: "profile", l: "Profil (fermé)", type: "select", o: [["", "—"], ...sks] }, { k: "path", l: "Trajectoire", type: "select", o: [["", "—"], ...sks] }, { k: "op", l: "Opération", type: "select", o: [["add", "Bossage"], ["cut", "Enlèvement"]] }] }); G.push({ t: "", f: [{ type: "info", html: "Le profil doit être dessiné sur un plan perpendiculaire au début de la trajectoire, et le traverser." }] }); break;
     case "weld": {
@@ -701,7 +790,7 @@ function pmSpec(f) {
       G.push({ t: "Tôle", f: [{ k: "thickness", l: "Épaisseur (mm)", type: "num" }, { k: "radius", l: "Rayon intérieur (mm)", type: "num" }, { k: "k", l: "Facteur K", type: "num" }, { k: "width", l: "Longueur de pliage (mm)", type: "num" }, { k: "mid", l: "Symétrique / plan d'esquisse", type: "check" }, { k: "reverse", l: "Inverser", type: "check" }] });
       break;
   }
-  if (["extrude", "revolve", "lpattern", "cpattern", "mirror", "weld", "sheet", "loft", "sweep", "cut", "revcut", "hole", "plane"].includes(f.type)) pm.preview ??= true; else pm.preview ??= false;
+  if (["extrude", "revolve", "lpattern", "cpattern", "mirror", "weld", "sheet", "loft", "sweep", "cut", "revcut", "hole", "plane", "split", "movebody", "part"].includes(f.type)) pm.preview ??= true; else pm.preview ??= false;
   return G;
 }
 function openPM(f, isNew) {
@@ -877,13 +966,18 @@ function measurePick(h) {
   let html = "<b>Mesurer</b>";
   measureSel.forEach((s, i) => {
     const o = sub(s);
-    if (s.kind === "face") { html += `<div>${i + 1}. Face ${o.geomType === "PLANE" ? "plane" : o.geomType.toLowerCase()} – aire <b>${fmt(R.measureArea(o), 2)} mm²</b></div>`; }
+    if (s.kind === "face") {
+      let extra = "";
+      if (o.geomType !== "PLANE") { const ce = o.edges.find(ed => ed.geomType === "CIRCLE"); if (ce) { const a = ce.pointAt(0).toTuple(), b = ce.pointAt(1 / 3).toTuple(), c = ce.pointAt(2 / 3).toTuple(); const A = v3.dist(a, b), Bd = v3.dist(b, c), Cd = v3.dist(c, a); const ar = v3.len(v3.cross(v3.sub(b, a), v3.sub(c, a))) / 2; if (ar > 1e-9) extra = ` – Ø <b>${fmt(A * Bd * Cd / (2 * ar), 3)}</b>`; } }
+      html += `<div>${i + 1}. Face ${o.geomType === "PLANE" ? "plane" : o.geomType.toLowerCase()} – aire <b>${fmt(R.measureArea(o), 2)} mm²</b>${extra}</div>`;
+    }
     else {
       let extra = "";
       if (o.geomType === "CIRCLE") { const a = o.pointAt(0).toTuple(), b = o.pointAt(1 / 3).toTuple(), c = o.pointAt(2 / 3).toTuple(); const A = v3.dist(a, b), Bd = v3.dist(b, c), Cd = v3.dist(c, a); const ar = v3.len(v3.cross(v3.sub(b, a), v3.sub(c, a))) / 2; const r = A * Bd * Cd / (4 * ar); extra = ` – Ø <b>${fmt(2 * r, 3)}</b>`; }
       html += `<div>${i + 1}. Arête ${o.geomType.toLowerCase()} – longueur <b>${fmt(o.length, 3)} mm</b>${extra}</div>`;
     }
   });
+  if (measureSel.length === 1) { const q = measureSel[0].p; html += `<div class="hint">Point cliqué : X ${fmt(q[0], 2)} ; Y ${fmt(q[1], 2)} ; Z ${fmt(q[2], 2)}</div>`; }
   if (measureSel.length === 2) {
     const [a, b] = measureSel.map(sub);
     const d = R.measureDistanceBetween(a, b);
@@ -1030,21 +1124,34 @@ function showDrawing() {
   };
   body.querySelectorAll("select,input").forEach(x => { x.onchange = gen; x.onkeydown = e => e.stopPropagation(); });
   modal("Mise en plan", body, [
+    { label: "Exporter DXF (AutoCAD)", click: () => { if (last) saveFile(`${doc.name} - plan.dxf`, svgDrawingToDXF(last.svg, last.H), toast); return false; } },
+    { label: "Exporter PNG", click: () => { if (last) svgToPng(last).then(b => saveFile(`${doc.name} - plan.png`, b, toast)); return false; } },
     { label: "Exporter SVG", click: () => { if (last) saveFile(`${doc.name} - plan.svg`, last.svg, toast); return false; } },
     { label: "Exporter PDF", pri: true, click: () => { if (last) svgToPdf(last).then(b => saveFile(`${doc.name} - plan.pdf`, b, toast)); return false; } },
     { label: "Fermer" }], { wide: true });
   gen();
 }
-async function svgToPdf(d) {
-  const pxPerMm = 8;
+async function svgToCanvas(d, pxPerMm = 8) {
   const img = new Image();
   const url = URL.createObjectURL(new Blob([d.svg], { type: "image/svg+xml" }));
   await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
   const c = document.createElement("canvas"); c.width = d.W * pxPerMm; c.height = d.H * pxPerMm;
   const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
-  URL.revokeObjectURL(url);
-  const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: [d.W, d.H] });
-  pdf.addImage(c.toDataURL("image/png"), "PNG", 0, 0, d.W, d.H);
+  URL.revokeObjectURL(url); return c;
+}
+async function svgToPng(d) { const c = await svgToCanvas(d, 8); return await new Promise(r => c.toBlob(r, "image/png")); }
+async function svgToPdf(d) {
+  // PDF vectoriel (net à toutes les échelles, léger)
+  const pdf = new jsPDF({ orientation: d.W >= d.H ? "landscape" : "portrait", unit: "mm", format: [d.W, d.H] });
+  try {
+    const el = new DOMParser().parseFromString(d.svg, "image/svg+xml").documentElement;
+    const holder = document.createElement("div"); holder.style.cssText = "position:fixed;left:-99999px;top:0"; holder.appendChild(el); document.body.appendChild(holder);
+    await svg2pdf(el, pdf, { x: 0, y: 0, width: d.W, height: d.H });
+    holder.remove();
+  } catch (e) {
+    const c = await svgToCanvas(d, 6);
+    pdf.addImage(c.toDataURL("image/jpeg", 0.92), "JPEG", 0, 0, d.W, d.H);
+  }
   return pdf.output("blob");
 }
 
@@ -1076,23 +1183,70 @@ async function openFile(file) {
   } catch (e) { toast("Ouverture impossible : " + e.message, true); }
 }
 function saveProject() { doc.name = $("#docname").value || "Pièce"; saveFile(doc.name + ".glcad.json", JSON.stringify(doc), toast); autosave(); }
-function exportMenu(x, y) {
-  popupMenu(x, y, [
-    { label: "STEP (.step) – pour autres logiciels CAO", icon: "export", click: () => exportCAD("step") },
-    { label: "STL (.stl) – impression 3D", icon: "export", click: () => exportCAD("stl") },
-    { label: "Esquisse sélectionnée → DXF", icon: "export", click: () => { const f = doc.features.find(q => q.id === treeSel && q.type === "sketch"); if (!f) return toast("Sélectionnez une esquisse dans l'arbre", true); exportSketchDXF(f); } },
-    { label: "Mise en plan (PDF / SVG)…", icon: "drawing", click: showDrawing },
-    { label: "Capture d'écran PNG", icon: "png", click: () => saveFile(doc.name + ".png", dataURLtoBlob(viewer.screenshot()), toast) },
-    "-",
-    { label: "Projet G&L CAO (.json)", icon: "save", click: saveProject },
-  ]);
+function exportMenu() { showExport(); }
+function meshesOf(fine = true) {
+  return bodiesOf(st).map(b => { const m = b.shape.mesh({ tolerance: fine ? 0.02 : 0.1, angularTolerance: fine ? 0.1 : 0.3 }); return { name: b.name || "corps", vertices: m.vertices, triangles: m.triangles, color: b.color }; });
+}
+function selectedPlanarFace() {
+  const s = selection.find(x => x.kind === "face"); if (!s) return null;
+  const f = bodiesOf(st)[s.body]?.shape.faces[s.face];
+  return f && f.geomType === "PLANE" ? { face: f, plane: planeFromNormal(f.center.toTuple(), f.normalAt().toTuple()) } : null;
+}
+function showExport() {
+  const name = doc.name;
+  const sel = doc.features.find(q => q.id === treeSel && q.type === "sketch");
+  const pf = selectedPlanarFace();
+  const B = (k, t, d) => `<button class="btn" data-x="${k}" style="display:flex;flex-direction:column;align-items:flex-start;text-align:left;min-width:210px"><b>${t}</b><span class="hint" style="margin:0">${d}</span></button>`;
+  const body = `<h4>Modèle 3D</h4><div class="btnrow">
+    ${B("step", "STEP (.step)", "SolidWorks, Fusion, Inventor, FreeCAD, TopSolid…")}
+    ${B("stp", "STEP (.stp)", "même format, extension .stp")}
+    ${B("stl", "STL binaire (.stl)", "impression 3D, tous logiciels")}
+    ${B("stla", "STL texte (.stl)", "STL lisible (ASCII)")}
+    ${B("3mf", "3MF (.3mf)", "Bambu Studio, PrusaSlicer, Cura")}
+    ${B("obj", "OBJ (.obj)", "Blender, SketchUp, rendus")}
+    ${B("glb", "glTF binaire (.glb)", "visionneuses 3D, web, réalité augmentée")}
+    ${B("ply", "PLY (.ply)", "maillage coloré")}
+  </div><h4 style="margin-top:12px">Plans et découpe 2D</h4><div class="btnrow">
+    ${B("dxfplan", "Mise en plan → DXF", "AutoCAD, DraftSight, LibreCAD (ouvre et enregistre en DWG)")}
+    ${B("pdfplan", "Mise en plan → PDF / SVG", "impression, envoi client")}
+    ${B("dxfface", "Face sélectionnée → DXF", pf ? "contour + trous de la face, pour découpe laser / plasma" : "sélectionnez d'abord une face plane dans la vue")}
+    ${B("dxfsk", "Esquisse → DXF", sel ? "esquisse « " + esc(sel.name) + " »" : "sélectionnez d'abord une esquisse dans l'arbre")}
+    ${B("dxfflat", "Développé de tôle → DXF", "tôle pliée : contour + lignes de pli")}
+    ${B("png", "Image PNG", "capture de la vue 3D")}
+  </div><h4 style="margin-top:12px">Projet</h4><div class="btnrow">${B("json", "Projet G&L CAO (.glcad.json)", "pour rouvrir et modifier la pièce")}</div>
+  <p class="hint" style="margin-top:10px">DWG : c'est un format fermé d'Autodesk, aucun logiciel libre ne peut l'écrire de façon fiable. Le DXF s'ouvre directement dans AutoCAD (et tous les logiciels DAO) ; dans AutoCAD, « Enregistrer sous » → DWG. Le convertisseur gratuit « ODA File Converter » transforme aussi des dossiers entiers de DXF en DWG.</p>`;
+  const m = modal("Exporter – " + esc(name), body, [{ label: "Fermer" }], { wide: true });
+  m.querySelectorAll("[data-x]").forEach(b => b.onclick = async () => {
+    const k = b.dataset.x;
+    try {
+      if (["step", "stp", "stl"].includes(k)) await exportCAD(k);
+      else if (k === "stla") saveFile(`${name}.stl`, toSTLAscii(meshesOf(), name), toast);
+      else if (k === "obj") saveFile(`${name}.obj`, toOBJ(meshesOf()), toast);
+      else if (k === "ply") saveFile(`${name}.ply`, toPLY(meshesOf()), toast);
+      else if (k === "3mf") saveFile(`${name}.3mf`, to3MF(meshesOf(), name), toast);
+      else if (k === "glb") exportGLB();
+      else if (k === "dxfplan" || k === "pdfplan") { m.remove(); showDrawing(); }
+      else if (k === "dxfface") { if (!pf) return toast("Sélectionnez d'abord une face plane dans la vue (clic sur la face)", true); saveFile(`${name} - face.dxf`, faceToDXF(pf.face, pf.plane, to2D), toast); }
+      else if (k === "dxfsk") { if (!sel) return toast("Sélectionnez d'abord une esquisse dans l'arbre", true); exportSketchDXF(sel); }
+      else if (k === "dxfflat") { const s2 = doc.features.filter(f => f.type === "sheet" && st.info[f.id]); if (!s2.length) return toast("Aucune tôle pliée valide", true); const f = s2.find(x => x.id === treeSel) || s2[s2.length - 1]; saveZipped(`${name} - ${f.name} - developpe.zip`, { [`${f.name}-developpe.dxf`]: flatPatternDXF(st.info[f.id], f.name) }, toast); }
+      else if (k === "png") saveFile(name + ".png", dataURLtoBlob(viewer.screenshot()), toast);
+      else if (k === "json") saveProject();
+    } catch (e) { toast("Export impossible : " + (e.message || e), true); }
+  });
+}
+function exportGLB() {
+  const ex = new GLTFExporter();
+  const grp = new THREE.Group();
+  for (const b of viewer.bodies) { const mm = new THREE.Mesh(b.mesh.geometry, new THREE.MeshStandardMaterial({ color: b.mesh.material[0].color, metalness: 0.4, roughness: 0.5 })); mm.name = b.name || "corps"; mm.scale.setScalar(0.001); grp.add(mm); }
+  ex.parse(grp, res => saveFile(`${doc.name}.glb`, new Blob([res]), toast), err => toast("Export GLB impossible : " + err, true), { binary: true });
 }
 async function exportCAD(kind) {
   const sh = exportCompound(st); if (!sh) return toast("Rien à exporter", true);
   try {
-    const blob = kind === "step" ? sh.blobSTEP() : sh.blobSTL({ binary: true, tolerance: 0.02, angularTolerance: 0.1 });
+    const blob = kind === "stl" ? sh.blobSTL({ binary: true, tolerance: 0.02, angularTolerance: 0.1 }) : sh.blobSTEP();
     const data = new Uint8Array(await blob.arrayBuffer());
-    saveZipped(`${doc.name} - ${kind.toUpperCase()}.zip`, { [`${doc.name}.${kind === "step" ? "step" : "stl"}`]: data }, toast);
+    const ext = kind === "stl" ? "stl" : kind;
+    saveZipped(`${doc.name} - ${ext.toUpperCase()}.zip`, { [`${doc.name}.${ext}`]: data }, toast);
   } catch (e) { toast("Export impossible : " + e.message, true); }
 }
 function dataURLtoBlob(u) { const b = atob(u.split(",")[1]); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return new Blob([a], { type: "image/png" }); }
@@ -1163,6 +1317,15 @@ function showHelp() {
   <h4>Métallerie</h4><ul>
   <li><b>Mécano-soudé</b> : dessinez des lignes (squelette) puis « Élément mécano-soudé » : tubes carrés / rectangulaires / ronds, plats, cornières, IPE, HEA, HEB, UPN… Coupes d'onglet automatiques et <b>liste de débit</b> avec longueurs, angles, masses, export CSV.</li>
   <li><b>Tôlerie</b> : dessinez un profil ouvert (lignes) puis « Tôle pliée » (épaisseur, rayon, facteur K). « Mise à plat » donne le développé et exporte le <b>DXF</b> pour la découpe laser.</li></ul>
+  <h4>Relations et cotes (comme SolidWorks)</h4><ul>
+  <li>Les rectangles et lignes horizontales/verticales reçoivent automatiquement leurs relations.</li>
+  <li>Outil <b>Cotation</b> : clic sur une ligne (longueur), un cercle (Ø), un arc (R), ou sur 2 points (distance alignée / horizontale / verticale). Les cotes posées sont <b>pilotantes</b> (en gras) : cliquez dessus pour changer la valeur, la géométrie suit.</li>
+  <li>Sélectionnez des entités ou des points (Maj+clic pour plusieurs) : le panneau propose Horizontale, Verticale, Parallèle, Perpendiculaire, Égale, Tangente, Concentrique, Colinéaire, Point milieu, Sur la ligne, Fixe… </li>
+  <li>Esquisse <b>bleue</b> = encore libre (le nombre de degrés de liberté est affiché), <b>noire</b> = totalement contrainte.</li></ul>
+  <h4>Autres fonctions</h4><ul><li><b>Fonction mince</b> (dans Bossage extrudé) : épaissit des lignes ouvertes (murets, cornières, U…).</li>
+  <li><b>Couper par un plan</b>, <b>Déplacer / copier le corps</b>, <b>Insérer une pièce</b> (un autre projet .json, positionné et répété : assemblage simple).</li>
+  <li><b>Perçages depuis une esquisse</b> : posez des points dans une esquisse sur la face, chaque point devient un trou.</li>
+  <li><b>Exporter</b> : STEP, STL, 3MF, OBJ, GLB, PLY, DXF (mise en plan, face, esquisse, développé), PDF vectoriel, SVG, PNG. Clic droit sur une face plane → DXF pour la découpe.</li></ul>
   <h4>Souris / tactile</h4><ul><li>Clic gauche glissé : rotation (hors esquisse) • Clic droit glissé : déplacement • Molette : zoom • Clic droit : menu contextuel.</li><li>Tactile : 1 doigt = rotation, 2 doigts = zoom / déplacement.</li></ul>
   <h4>Raccourcis</h4><ul><li>Ctrl+Z / Ctrl+Y : annuler / rétablir • Ctrl+S : enregistrer • F : zoom au mieux • Échap : annuler • Suppr : supprimer • Entrée : valider la fonction.</li><li>Vues : Ctrl+1 face, Ctrl+2 arrière, Ctrl+3 gauche, Ctrl+4 droite, Ctrl+5 dessus, Ctrl+6 dessous, Ctrl+7 isométrique, Ctrl+8 normal à la sélection.</li></ul>
   <h4>Paramétrage</h4><p>Tous les champs numériques acceptent des formules et des variables (Évaluer → Équations). Double-cliquez une fonction de l'arbre pour la modifier ; tout est recalculé.</p>
@@ -1206,7 +1369,7 @@ async function main() {
   $("#bNew").onclick = e => newMenu(e.clientX, e.clientY + 10);
   $("#bOpen").onclick = () => pickFile(".json,.glcad,.step,.stp,.stl", openFile);
   $("#bSave").onclick = saveProject;
-  $("#bExport").onclick = e => exportMenu(e.clientX, e.clientY + 10);
+  $("#bExport").onclick = () => showExport();
   $("#bUndo").onclick = undo; $("#bRedo").onclick = redo; $("#bHelp").onclick = showHelp;
   $("#docname").onchange = () => { doc.name = $("#docname").value || "Pièce"; renderTree(); autosave(); };
   $("#docname").onkeydown = e => e.stopPropagation();

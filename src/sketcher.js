@@ -1,6 +1,7 @@
 // Mode esquisse : outils de dessin 2D sur un plan, accrochages, cotes pilotantes
 import * as THREE from "three";
 import { v2, to3D, to2D, planeY, circleFrom3, arcSample, slotOutline } from "./geom.js";
+import { solveSketch, cleanConstraints, REL_GLYPH, isDim, POINT_KEYS } from "./solver.js";
 
 let uid = 0;
 export const newId = (p = "e") => p + Date.now().toString(36) + (uid++).toString(36);
@@ -8,10 +9,13 @@ export const newId = (p = "e") => p + Date.now().toString(36) + (uid++).toString
 const C = { line: 0x1a1a1a, sel: 0x0a6cff, cons: 0x7a7f87, hover: 0xff8a00, preview: 0x0a84ff, point: 0x111111 };
 
 export class Sketcher {
-  constructor(viewer, plane, entities, ui) {
+  constructor(viewer, plane, entities, ui, constraints) {
     this.v = viewer; this.plane = plane; this.ui = ui;
     this.ents = JSON.parse(JSON.stringify(entities || []));
+    this.cons = JSON.parse(JSON.stringify(constraints || []));
+    this.selPts = new Set(); this.showRels = true; this.autoRel = true; this.dofCache = null;
     this.tool = "line"; this.temp = []; this.sel = new Set(); this.hoverId = null;
+    if (!constraints) for (const e of this.ents) if (e.t === "line" && e.g && e.gk === "rect") { if (Math.abs(e.a[1] - e.b[1]) < 1e-9) this.cons.push({ t: "h", e: e.id }); else if (Math.abs(e.a[0] - e.b[0]) < 1e-9) this.cons.push({ t: "v", e: e.id }); }
     this.undoStack = []; this.redoStack = [];
     this.gridSnap = true; this.showDims = true; this.polySides = 6; this.filletR = 5;
     this.labels = document.createElement("div"); this.labels.className = "sk-labels";
@@ -28,10 +32,38 @@ export class Sketcher {
     this.v.sketchGroup.clear(); this.v.render();
   }
   // ----- historique
-  snapshot() { this.undoStack.push(JSON.stringify(this.ents)); if (this.undoStack.length > 200) this.undoStack.shift(); this.redoStack = []; }
-  undo() { if (!this.undoStack.length) return; this.redoStack.push(JSON.stringify(this.ents)); this.ents = JSON.parse(this.undoStack.pop()); this.sel.clear(); this.changed(); }
-  redo() { if (!this.redoStack.length) return; this.undoStack.push(JSON.stringify(this.ents)); this.ents = JSON.parse(this.redoStack.pop()); this.sel.clear(); this.changed(); }
-  changed() { this.draw(); this.ui.onSketchChange?.(this); }
+  state() { return JSON.stringify({ e: this.ents, c: this.cons }); }
+  restore(s) { const o = JSON.parse(s); this.ents = o.e; this.cons = o.c; }
+  snapshot() { this.undoStack.push(this.state()); if (this.undoStack.length > 200) this.undoStack.shift(); this.redoStack = []; }
+  undo() { if (!this.undoStack.length) return; this.redoStack.push(this.state()); this.restore(this.undoStack.pop()); this.sel.clear(); this.selPts.clear(); this.changed(); }
+  redo() { if (!this.redoStack.length) return; this.undoStack.push(this.state()); this.restore(this.redoStack.pop()); this.sel.clear(); this.selPts.clear(); this.changed(); }
+  changed() { this.cons = cleanConstraints(this.ents, this.cons); this.dofCache = null; this.draw(); this.ui.onSketchChange?.(this); }
+  // résolution des contraintes ; renvoie false (et annule) en cas de conflit
+  solve(opts = {}) {
+    if (!this.cons.length) return true;
+    const backup = JSON.stringify(this.ents);
+    const r = solveSketch(this.ents, this.cons, opts);
+    if (!r.ok && !opts.drag) { this.ents = JSON.parse(backup); return false; }
+    return true;
+  }
+  dof() { if (this.dofCache == null) { try { this.dofCache = solveSketch(JSON.parse(JSON.stringify(this.ents)), this.cons, { dof: true }).dof; } catch { this.dofCache = -1; } } return this.dofCache; }
+  addConstraint(c) {
+    const key = JSON.stringify(c);
+    if (this.cons.some(x => JSON.stringify(x) === key)) { this.ui.toast?.("Cette relation existe déjà"); return true; }
+    this.snapshot(); this.cons.push(c);
+    if (!this.solve()) { this.cons.pop(); this.undoStack.pop(); return false; }
+    this.changed(); return true;
+  }
+  removeConstraint(i) { this.snapshot(); this.cons.splice(i, 1); this.changed(); }
+  // cote pilotante : crée ou met à jour, puis résout
+  setDim(match, c) {
+    this.snapshot();
+    const i = this.cons.findIndex(match);
+    const old = i >= 0 ? { ...this.cons[i] } : null;
+    if (i >= 0) this.cons[i] = { ...this.cons[i], ...c }; else this.cons.push(c);
+    if (!this.solve()) { if (i >= 0) this.cons[i] = old; else this.cons.pop(); this.undoStack.pop(); this.ui.toast?.("Cette cote est en conflit avec les relations existantes (ou sur-contraint)", true); return false; }
+    this.changed(); return true;
+  }
   setTool(t) { this.tool = t; this.temp = []; this.preview = null; this.chainStart = null; this.draw(); this.ui.onSketchTool?.(t); }
 
   // ----- événements
@@ -67,7 +99,7 @@ export class Sketcher {
     const tol = this.px() * 9;
     let best = null, bd = tol;
     for (const s of this.snapPoints()) { const d = v2.dist(s.p, r); if (d < bd) { bd = d; best = s; } }
-    if (best) { this.showSnap(best.k, e); return [...best.p]; }
+    if (best) { this.showSnap(best.k, e); this.lastInfer = ""; return [...best.p]; }
     let p = [...r];
     let label = "";
     if (ref) {
@@ -86,7 +118,7 @@ export class Sketcher {
       if (Math.abs(s.p[0] - r[0]) < tol * 0.6) { p[0] = s.p[0]; label = "aligné"; }
       if (Math.abs(s.p[1] - r[1]) < tol * 0.6) { p[1] = s.p[1]; label = "aligné"; }
     }
-    this.showSnap(label, e);
+    this.showSnap(label, e); this.lastInfer = label;
     p = p.map(x => Math.round(x * 1e6) / 1e6);
     return p;
   }
@@ -112,13 +144,19 @@ export class Sketcher {
     const p = this.raw2D(e); if (!p) return;
     if (this.tool === "select") {
       const h = this.pointHandle(p);
-      if (h) { this.drag = { ...h, from: [...h.e[h.k]] }; this.snapshot(); this.v.controls.enabled = false; return; }
+      if (h) { this.drag = { ...h, from: [...h.e[h.k]], start: [...h.e[h.k]] }; this.snapshot(); this.v.controls.enabled = false; return; }
     }
   }
   onUp(e) {
     if (e.button !== 0) return;
     this.v.controls.enabled = true;
-    if (this.drag) { const moved = !v2.eq(this.drag.from, this.drag.e[this.drag.k]); this.drag = null; if (moved) { this.changed(); return; } this.undoStack.pop(); }
+    if (this.drag) {
+      const moved = !v2.eq(this.drag.start, this.drag.e[this.drag.k], 1e-4); const dr = this.drag; this.drag = null;
+      if (moved) { if (this.cons.length) solveSketch(this.ents, this.cons, { force: true }); this.changed(); return; }
+      this.undoStack.pop();
+      // simple clic sur un point : sélection du point
+      if (this.tool === "select") { const key = dr.e.id + ":" + dr.k; if (!e.shiftKey && !e.ctrlKey) { this.sel.clear(); this.selPts.clear(); } if (this.selPts.has(key)) this.selPts.delete(key); else this.selPts.add(key); this.draw(); this.ui.onSketchSelect?.(this); return; }
+    }
     if (this.downAt && Math.hypot(e.clientX - this.downAt[0], e.clientY - this.downAt[1]) > 6 && e.pointerType !== "touch") return;
     this.click(e);
   }
@@ -126,9 +164,10 @@ export class Sketcher {
     const p = this.raw2D(e); if (!p) return;
     if (this.drag) {
       const np = this.snap(e);
-      if (this.drag.e.g && this.drag.e.gk === "rect") moveRectCorner(this.ents, this.drag.e.g, this.drag.from, np);
+      if (this.cons.length) { solveSketch(this.ents, this.cons, { drag: { e: this.drag.e, k: this.drag.k, to: np }, force: true }); }
+      else if (this.drag.e.g && this.drag.e.gk === "rect") moveRectCorner(this.ents, this.drag.e.g, this.drag.from, np);
       else movePoint(this.ents, this.drag.from, np, this.drag.e, this.drag.k);
-      this.drag.from = [...np];
+      this.drag.from = [...this.drag.e[this.drag.k]];
       this.draw(); return;
     }
     if (this.tool === "select" || this.tool === "trim" || this.tool === "dim" || this.tool === "fillet") {
@@ -149,7 +188,7 @@ export class Sketcher {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { this.redo(); return true; }
     return false;
   }
-  deleteSelected() { this.snapshot(); this.ents = this.ents.filter(x => !this.sel.has(x.id)); this.sel.clear(); this.changed(); }
+  deleteSelected() { this.snapshot(); this.ents = this.ents.filter(x => !this.sel.has(x.id)); this.sel.clear(); this.selPts.clear(); this.changed(); }
   add(...es) { for (const e of es) { e.id ||= newId(); this.ents.push(e); } }
 
   click(e) {
@@ -159,27 +198,50 @@ export class Sketcher {
       if (t === "dim") {
         const ph = p && this.pointHandle(p);
         const origin = p && v2.dist(p, [0, 0]) < this.px() * 8 ? { e: null, k: null, p: [0, 0] } : null;
-        const pt = ph ? { p: [...ph.e[ph.k]] } : origin;
+        const pt = ph ? { p: [...ph.e[ph.k]], ref: { e: ph.e.id, k: ph.k } } : origin ? { p: [0, 0], ref: null } : null;
         if (pt) {
-          if (this.dimFirst && !v2.eq(this.dimFirst.p, pt.p)) { const a = this.dimFirst; this.dimFirst = null; this.draw(); this.ui.editDistance?.(this, a.p, pt.p, e); return; }
+          if (this.dimFirst && !v2.eq(this.dimFirst.p, pt.p)) { const a = this.dimFirst; this.dimFirst = null; this.draw(); this.ui.editDistance?.(this, a, pt, e); return; }
           this.dimFirst = pt; this.draw(); return;
         }
         this.dimFirst = null;
         if (h) this.ui.editDim?.(this, h, e); return;
       }
-      if (!e.shiftKey && !e.ctrlKey) this.sel.clear();
+      if (!e.shiftKey && !e.ctrlKey) { this.sel.clear(); this.selPts.clear(); }
       if (h) { if (this.sel.has(h.id)) this.sel.delete(h.id); else this.sel.add(h.id); }
       this.draw(); this.ui.onSketchSelect?.(this); return;
     }
-    if (t === "trim") { const p = this.raw2D(e); const h = p && this.hit(p); if (h) { this.snapshot(); trimEntity(this.ents, h, p); this.changed(); } return; }
-    if (t === "fillet") { const p = this.raw2D(e); if (p) { this.snapshot(); if (!sketchFillet(this.ents, p, this.filletR, this.px() * 10)) this.undoStack.pop(); else this.changed(); } return; }
+    if (t === "trim") {
+      const p = this.raw2D(e); const h = p && this.hit(p);
+      if (h) {
+        this.snapshot(); const before = new Set(this.ents.map(x => x.id)); const keep = this.cons.filter(c => (c.t === "h" || c.t === "v") && c.e === h.id);
+        trimEntity(this.ents, h, p);
+        for (const n of this.ents.filter(x => !before.has(x.id) && x.t === "line")) for (const c of keep) this.cons.push({ t: c.t, e: n.id });
+        this.changed();
+      }
+      return;
+    }
+    if (t === "fillet") {
+      const p = this.raw2D(e);
+      if (p) {
+        this.snapshot(); const before = new Set(this.ents.map(x => x.id));
+        if (!sketchFillet(this.ents, p, this.filletR, this.px() * 10)) this.undoStack.pop();
+        else {
+          const arc = this.ents.find(x => !before.has(x.id) && x.t === "arc");
+          if (arc) for (const l of this.ents.filter(x => x.t === "line" && (v2.eq(x.a, arc.a) || v2.eq(x.b, arc.a) || v2.eq(x.a, arc.b) || v2.eq(x.b, arc.b)))) this.cons.push({ t: "tan", e1: l.id, e2: arc.id });
+          this.changed();
+        }
+      }
+      return;
+    }
     const p = this.snap(e, this.temp[this.temp.length - 1]); if (!p) return;
     const tp = this.temp;
     switch (t) {
       case "line": case "centerline": {
         if (!tp.length) { tp.push(p); this.chainStart = p; break; }
         const a = tp[tp.length - 1]; if (v2.eq(a, p)) { this.temp = []; break; }
-        this.snapshot(); this.add({ t: "line", a, b: p, cons: t === "centerline" }); this.changed();
+        this.snapshot(); const nl = { t: "line", a, b: p, cons: t === "centerline" }; this.add(nl);
+        if (this.autoRel) { if (Math.abs(a[1] - p[1]) < 1e-9 && this.lastInfer === "horizontal") this.cons.push({ t: "h", e: nl.id }); else if (Math.abs(a[0] - p[0]) < 1e-9 && this.lastInfer === "vertical") this.cons.push({ t: "v", e: nl.id }); }
+        this.changed();
         if (t === "centerline" || (this.chainStart && v2.eq(p, this.chainStart) && tp.length > 1)) { this.temp = []; this.chainStart = null; }
         else tp.push(p);
         break;
@@ -188,7 +250,9 @@ export class Sketcher {
         if (!tp.length) { tp.push(p); break; }
         const [a] = tp; const c = t === "crect" ? [2 * a[0] - p[0], 2 * a[1] - p[1]] : a;
         if (Math.abs(p[0] - c[0]) < 1e-9 || Math.abs(p[1] - c[1]) < 1e-9) break;
-        this.snapshot(); this.add(...rectLines(c, p)); this.temp = []; this.changed(); break;
+        this.snapshot(); const rl = rectLines(c, p); this.add(...rl);
+        if (this.autoRel) rl.forEach((l, i) => this.cons.push({ t: i % 2 ? "v" : "h", e: l.id }));
+        this.temp = []; this.changed(); break;
       }
       case "circle": {
         if (!tp.length) { tp.push(p); break; }
@@ -260,8 +324,9 @@ export class Sketcher {
       const mat = dashed ? new THREE.LineDashedMaterial({ color, dashSize: this.px() * 8, gapSize: this.px() * 4, depthTest: false }) : new THREE.LineBasicMaterial({ color, depthTest: false });
       const l = new THREE.Line(geo, mat); if (dashed) l.computeLineDistances(); l.renderOrder = 30; g.add(l);
     };
+    const full = this.cons.length && this.ents.length && this.dof() === 0;
     for (const e of this.ents) {
-      const col = this.sel.has(e.id) ? C.sel : e.id === this.hoverId ? C.hover : e.cons ? C.cons : C.line;
+      const col = this.sel.has(e.id) ? C.sel : e.id === this.hoverId ? C.hover : e.cons ? C.cons : (full ? 0x111111 : 0x1f5fbf);
       addEnt(e, col, !!e.cons);
     }
     if (this.preview) for (const e of this.preview) addEnt(e, C.preview, !!e.cons);
@@ -270,6 +335,7 @@ export class Sketcher {
     for (const e of this.ents) for (const k of handleKeys(e)) ends.push(P(e[k]));
     for (const t of this.temp) ends.push(P(t));
     if (ends.length) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints(ends), new THREE.PointsMaterial({ color: 0x1f2937, size: 5, sizeAttenuation: false, depthTest: false })); m.renderOrder = 31; g.add(m); }
+    if (this.selPts.size) { const pts = [...this.selPts].map(k => { const [id, kk] = k.split(":"); const en = this.ents.find(x => x.id === id); return en ? P(en[kk]) : null; }).filter(Boolean); const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), new THREE.PointsMaterial({ color: C.sel, size: 10, sizeAttenuation: false, depthTest: false })); m.renderOrder = 33; g.add(m); }
     if (this.dimFirst) { const m = new THREE.Points(new THREE.BufferGeometry().setFromPoints([P(this.dimFirst.p)]), new THREE.PointsMaterial({ color: 0xff8a00, size: 11, sizeAttenuation: false, depthTest: false })); m.renderOrder = 32; g.add(m); }
     if (this.showGrid) this.drawGrid(g, P);
     // origine de l'esquisse
@@ -294,20 +360,37 @@ export class Sketcher {
     ls.renderOrder = 29; g.add(ls);
   }
   // déplacer / copier / pivoter les entités sélectionnées
-  transformSelected(fn, copy) {
+  transformSelected(fn, copy, keepOrient = true) {
     const sel = this.ents.filter(e => this.sel.has(e.id)); if (!sel.length) return "Sélectionnez des entités";
     this.snapshot();
-    const gmap = {};
+    const gmap = {}, idmap = {};
     for (const e of sel) {
       const c = copy ? JSON.parse(JSON.stringify(e)) : e;
-      if (copy) { c.id = newId(); if (c.g) c.g = gmap[c.g] ||= newId("g"); }
+      if (copy) { c.id = newId(); idmap[e.id] = c.id; if (c.g) c.g = gmap[c.g] ||= newId("g"); }
       for (const k of ["a", "b", "m", "c", "p", "pc"]) if (c[k]) c[k] = fn(c[k]).map(round);
       if (copy) this.ents.push(c);
     }
+    const orientRel = c => ["h", "v", "hpts", "vpts", "fix", "angle"].includes(c.t);
+    if (copy) this.copyConstraints(idmap, c => keepOrient || !orientRel(c));
+    else if (!keepOrient) { const ids = new Set(sel.map(e => e.id)); this.cons = this.cons.filter(c => !(orientRel(c) && [c.e, c.e1, c.e2, c.p?.e, c.p1?.e, c.p2?.e].some(x => ids.has(x)))); }
+    if (!copy) { const ids = new Set(sel.map(e => e.id)); this.cons = this.cons.filter(c => !(c.t === "fix" && ids.has(c.p?.e))); if (this.cons.length) solveSketch(this.ents, this.cons, { force: true }); }
     this.changed(); return null;
   }
+  // duplique les relations internes à un groupe d'entités copiées
+  copyConstraints(idmap, filter = () => true) {
+    const add = [];
+    for (const c of this.cons) {
+      const refs = [c.e, c.e1, c.e2, c.p?.e, c.p1?.e, c.p2?.e].filter(Boolean);
+      if (!refs.length || !refs.every(id => idmap[id]) || !filter(c)) continue;
+      const n = JSON.parse(JSON.stringify(c));
+      for (const k of ["e", "e1", "e2"]) if (n[k]) n[k] = idmap[n[k]];
+      for (const k of ["p", "p1", "p2"]) if (n[k]) n[k].e = idmap[n[k].e];
+      add.push(n);
+    }
+    this.cons.push(...add);
+  }
   moveSelected(dx, dy, copy) { return this.transformSelected(p => [p[0] + dx, p[1] + dy], copy); }
-  rotateSelected(cx, cy, deg, copy) { const a = deg * Math.PI / 180; return this.transformSelected(p => v2.add([cx, cy], v2.rot(v2.sub(p, [cx, cy]), a)), copy); }
+  rotateSelected(cx, cy, deg, copy) { const a = deg * Math.PI / 180; return this.transformSelected(p => v2.add([cx, cy], v2.rot(v2.sub(p, [cx, cy]), a)), copy, Math.abs(deg % 90) < 1e-9 && false); }
   // cote entre deux points : déplace le second point (et tout ce qui y est relié)
   setDistance(p1, p2, val, mode) {
     let target;
@@ -329,25 +412,56 @@ export class Sketcher {
     movePointAll(this.ents, p2, target.map(round));
   }
   updateLabels() {
-    if (!this.showDims) { this.labels.innerHTML = ""; return; }
     const out = [];
     const S = p => this.v.toScreen(to3D(this.plane, p));
     const fmt = x => (Math.round(x * 100) / 100).toString().replace(".", ",");
-    const seenGroup = new Set();
-    for (const e of this.ents) {
-      if (e.cons || e.t === "point") continue;
+    const E = id => this.ents.find(x => x.id === id);
+    const PT = r => { if (!r) return [0, 0]; const en = E(r.e); return en ? en[r.k] : [0, 0]; };
+    const driven = new Set();
+    // cotes pilotantes
+    this.cons.forEach((c, i) => {
       let pos, txt;
-      if (e.t === "line") {
-        if (e.g && e.gk === "poly") { if (seenGroup.has(e.g)) continue; seenGroup.add(e.g); }
-        const m = v2.mul(v2.add(e.a, e.b), 0.5); const d = v2.norm(v2.sub(e.b, e.a)); const n = [-d[1], d[0]];
-        pos = S(v2.add(m, v2.mul(n, this.px() * 14))); txt = fmt(v2.dist(e.a, e.b));
-      } else if (e.t === "circle") { pos = S([e.c[0] + e.r * 0.7071, e.c[1] + e.r * 0.7071]); txt = "Ø" + fmt(2 * e.r); }
-      else if (e.t === "arc") { const c = circleFrom3(e.a, e.m, e.b); if (!c) continue; pos = S(e.m); txt = "R" + fmt(c.r); }
-      else if (e.t === "slot") { pos = S(v2.mul(v2.add(e.a, e.b), 0.5)); txt = fmt(v2.dist(e.a, e.b)) + " × " + fmt(2 * e.r); }
-      out.push(`<div class="sk-dim" data-id="${e.id}" style="left:${pos[0]}px;top:${pos[1]}px">${txt}</div>`);
+      if (c.t === "len") { const e = E(c.e); if (!e) return; driven.add(e.id); const m = v2.mul(v2.add(e.a, e.b), 0.5); const d = v2.norm(v2.sub(e.b, e.a)); pos = S(v2.add(m, v2.mul([-d[1], d[0]], this.px() * 16))); txt = fmt(c.val); }
+      else if (c.t === "rad" || c.t === "dia") { const e = E(c.e); if (!e) return; driven.add(e.id); const cc = e.t === "circle" ? { c: e.c, r: e.r } : circleFrom3(e.a, e.m, e.b); if (!cc) return; pos = S([cc.c[0] + cc.r * 0.7071, cc.c[1] + cc.r * 0.7071]); txt = (c.t === "dia" ? "Ø" : "R") + fmt(c.val); }
+      else if (c.t === "dist") { const p1 = PT(c.p1), p2 = c.p2 ? PT(c.p2) : [0, 0]; const m = v2.mul(v2.add(p1, p2), 0.5); pos = S(v2.add(m, [0, this.px() * 12])); txt = (c.mode === "h" ? "↔ " : c.mode === "v" ? "↕ " : "") + fmt(c.val); }
+      else if (c.t === "angle") { const e1 = E(c.e1); if (!e1) return; pos = S(v2.mul(v2.add(e1.a, e1.b), 0.5)); pos = [pos[0] + 14, pos[1] + 14]; txt = fmt(c.val) + "°"; }
+      else return;
+      out.push(`<div class="sk-dim drv" data-ci="${i}" style="left:${pos[0]}px;top:${pos[1]}px">${txt}</div>`);
+    });
+    // cotes d'information (non pilotantes)
+    if (this.showDims) {
+      const seenGroup = new Set();
+      for (const e of this.ents) {
+        if (e.cons || e.t === "point" || driven.has(e.id)) continue;
+        let pos, txt;
+        if (e.t === "line") {
+          if (e.g && e.gk === "poly") { if (seenGroup.has(e.g)) continue; seenGroup.add(e.g); }
+          const m = v2.mul(v2.add(e.a, e.b), 0.5); const d = v2.norm(v2.sub(e.b, e.a)); const n = [-d[1], d[0]];
+          pos = S(v2.add(m, v2.mul(n, this.px() * 14))); txt = fmt(v2.dist(e.a, e.b));
+        } else if (e.t === "circle") { pos = S([e.c[0] + e.r * 0.7071, e.c[1] + e.r * 0.7071]); txt = "Ø" + fmt(2 * e.r); }
+        else if (e.t === "arc") { const c = circleFrom3(e.a, e.m, e.b); if (!c) continue; pos = S(e.m); txt = "R" + fmt(c.r); }
+        else if (e.t === "slot") { pos = S(v2.mul(v2.add(e.a, e.b), 0.5)); txt = fmt(v2.dist(e.a, e.b)) + " × " + fmt(2 * e.r); }
+        out.push(`<div class="sk-dim info" data-id="${e.id}" style="left:${pos[0]}px;top:${pos[1]}px">${txt}</div>`);
+      }
+    }
+    // symboles de relations
+    if (this.showRels) {
+      const cnt = new Map();
+      for (const c of this.cons) {
+        const g = REL_GLYPH[c.t]; if (!g) continue;
+        const ids = [c.e, c.e1, c.e2, c.p?.e, c.p1?.e].filter(Boolean);
+        for (const id of [...new Set(ids)]) {
+          const e = E(id); if (!e) continue;
+          let base = e.t === "line" ? v2.mul(v2.add(e.a, e.b), 0.5) : e.t === "circle" ? [e.c[0], e.c[1] - e.r] : e.t === "arc" ? e.m : e.t === "point" ? e.p : e.a;
+          const n = cnt.get(id) || 0; cnt.set(id, n + 1);
+          const sp = S(base);
+          out.push(`<div class="sk-rel" title="${c.t}" style="left:${sp[0] + 10 + n * 15}px;top:${sp[1] + 10}px">${g}</div>`);
+        }
+      }
     }
     this.labels.innerHTML = out.join("");
-    this.labels.querySelectorAll(".sk-dim").forEach(el => el.onpointerdown = ev => { ev.stopPropagation(); const ent = this.ents.find(x => x.id === el.dataset.id); if (ent) this.ui.editDim?.(this, ent, ev); });
+    this.labels.querySelectorAll(".sk-dim.info").forEach(el => el.onpointerdown = ev => { ev.stopPropagation(); const ent = E(el.dataset.id); if (ent) this.ui.editDim?.(this, ent, ev); });
+    this.labels.querySelectorAll(".sk-dim.drv").forEach(el => el.onpointerdown = ev => { ev.stopPropagation(); this.ui.editConstraintDim?.(this, +el.dataset.ci, ev); });
   }
   // ----- modifications de cotes
   setLineLength(e, L) {
@@ -381,14 +495,16 @@ export class Sketcher {
     const d = v2.norm(v2.sub(axis.b, axis.a));
     const M = p => { const q = v2.sub(p, axis.a); const t = v2.dot(q, d); const proj = v2.add(axis.a, v2.mul(d, t)); return v2.sub(v2.mul(proj, 2), p).map(round); };
     this.snapshot();
-    const gmap = {};
+    const gmap = {}, idmap = {};
     for (const e of sel) {
       if (e === axis) continue;
-      const c = JSON.parse(JSON.stringify(e)); c.id = newId();
+      const c = JSON.parse(JSON.stringify(e)); c.id = newId(); idmap[e.id] = c.id;
       if (c.g) c.g = gmap[c.g] ||= newId("g");
       for (const k of ["a", "b", "m", "c", "p"]) if (c[k]) c[k] = M(c[k]);
       this.ents.push(c);
     }
+    const hv = Math.abs(d[0]) < 1e-9 || Math.abs(d[1]) < 1e-9;
+    this.copyConstraints(idmap, c => hv || !["h", "v", "hpts", "vpts", "fix", "angle"].includes(c.t));
     this.changed(); return null;
   }
   offsetSelected(dist) {
@@ -409,12 +525,13 @@ export class Sketcher {
     const sel = this.ents.filter(e => this.sel.has(e.id)); if (!sel.length) return "Sélectionnez des entités";
     this.snapshot();
     for (let i = 1; i < n; i++) {
-      const gmap = {};
+      const gmap = {}, idmap = {};
       for (const e of sel) {
-        const c = JSON.parse(JSON.stringify(e)); c.id = newId(); if (c.g) c.g = gmap[c.g] ||= newId("g");
-        for (const k of ["a", "b", "m", "c", "p"]) if (c[k]) c[k] = [c[k][0] + dx * i, c[k][1] + dy * i];
+        const c = JSON.parse(JSON.stringify(e)); c.id = newId(); idmap[e.id] = c.id; if (c.g) c.g = gmap[c.g] ||= newId("g");
+        for (const k of ["a", "b", "m", "c", "p", "pc"]) if (c[k]) c[k] = [c[k][0] + dx * i, c[k][1] + dy * i];
         this.ents.push(c);
       }
+      this.copyConstraints(idmap, c => c.t !== "fix");
     }
     this.changed(); return null;
   }

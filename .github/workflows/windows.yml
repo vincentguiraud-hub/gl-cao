@@ -1,7 +1,8 @@
 name: Installateur Windows
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths: ["desktop/**", ".github/workflows/windows.yml"]
   workflow_dispatch:
 permissions:
   contents: write

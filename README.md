@@ -11,7 +11,7 @@ Chaque modification envoyée sur la branche `main` est publiée automatiquement 
 **aucune réinstallation n'est nécessaire**. Une bannière « Nouvelle version disponible » apparaît aussi
 dans l'application ouverte.
 
-Le lanceur Windows lui-même n'est reconstruit que lors d'un tag `vX.Y.Z` (rare).
+Le lanceur Windows (installateur) n'est reconstruit que lorsque le dossier `desktop/` change : augmenter alors `version` dans `desktop/package.json`.
 
 ## Développement
 ```

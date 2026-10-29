@@ -21,7 +21,7 @@
     "productName": "G&L CAO 3D",
     "files": ["main.cjs", "icon.png", "app/**/*"],
     "directories": { "output": "dist" },
-    "win": { "target": "nsis", "icon": "icon.png", "signAndEditExecutable": false },
+    "win": { "target": "nsis", "icon": "icon.png", "signAndEditExecutable": true },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "createStartMenuShortcut": true, "shortcutName": "G&L CAO 3D", "artifactName": "GL-CAO-3D-Setup.${ext}", "installerIcon": "icon.ico", "uninstallerIcon": "icon.ico" },
     "publish": [{ "provider": "github", "owner": "vincentguiraud-hub", "repo": "gl-cao", "releaseType": "release" }]
   }

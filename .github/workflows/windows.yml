@@ -23,4 +23,4 @@ jobs:
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
         run: |
           npm ci
-          npx electron-builder --win nsis --x64 -c.win.signAndEditExecutable=true --publish always
+          npx electron-builder --win nsis --x64 --publish always

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+public/occt-wasm.js
+desktop/node_modules/
+desktop/dist/
+desktop/app/

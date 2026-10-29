@@ -1,0 +1,25 @@
+name: Installateur Windows
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm run build
+      - name: Copier l'application dans le lanceur
+        shell: bash
+        run: rm -rf desktop/app && cp -r dist desktop/app
+      - name: Construire l'installateur
+        working-directory: desktop
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          npm ci
+          npx electron-builder --win nsis --x64 -c.win.signAndEditExecutable=true --publish always

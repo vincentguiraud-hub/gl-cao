@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>G&amp;L CAO 3D</title>
+<style>
+:root{--bg:#eef1f4;--panel:#f8f9fb;--line:#d6dbe1;--ink:#1d2430;--muted:#6a7380;--accent:#e2701b;--accent2:#0a6cff;--top:#1f2a36;--top2:#2b3846;--sel:#dce9ff;--err:#d93025}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font:13px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:var(--ink);background:var(--bg);overflow:hidden;-webkit-user-select:none;user-select:none}
+input,select,button,textarea{font:inherit;color:inherit}
+#app{display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;grid-template-columns:minmax(0,1fr);height:100%}
+#topbar,#cmdbar{min-width:0}
+/* barre supérieure */
+#topbar{display:flex;align-items:center;gap:6px;background:var(--top);color:#e8edf2;padding:4px 8px;min-height:38px}
+#topbar .brand{display:flex;align-items:center;gap:7px;font-weight:700;letter-spacing:.3px;margin-right:8px;white-space:nowrap}
+#topbar .brand b{background:var(--accent);color:#fff;border-radius:5px;padding:1px 6px;font-size:12px}
+.tbtn{display:inline-flex;align-items:center;gap:5px;background:transparent;border:1px solid transparent;color:inherit;border-radius:6px;padding:4px 7px;cursor:pointer;white-space:nowrap}
+.tbtn:hover{background:rgba(255,255,255,.1)}
+.tbtn:disabled{opacity:.4;cursor:default}
+#docname{background:transparent;border:1px solid transparent;color:#fff;border-radius:5px;padding:3px 6px;width:180px;font-weight:600}
+#docname:hover,#docname:focus{border-color:#4b5b6c;outline:none;background:var(--top2)}
+.spacer{flex:1}
+/* onglets de commandes */
+#cmdbar{background:var(--panel);border-bottom:1px solid var(--line)}
+#tabs{display:flex;gap:2px;padding:4px 8px 0;overflow-x:auto;scrollbar-width:none}
+#tabs button{border:none;background:none;padding:6px 12px;border-radius:7px 7px 0 0;cursor:pointer;color:var(--muted);font-weight:600;white-space:nowrap}
+#tabs button.on{background:#fff;color:var(--ink);box-shadow:0 -1px 0 var(--line) inset}
+#tools{display:flex;gap:2px;padding:5px 8px;background:#fff;overflow-x:auto;min-height:62px;align-items:stretch;scrollbar-width:thin}
+.cbtn{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:3px;min-width:64px;max-width:86px;padding:5px 4px;border:1px solid transparent;border-radius:7px;background:none;cursor:pointer;font-size:11px;line-height:1.15;text-align:center;color:var(--ink)}
+.cbtn:hover{background:#f1f4f8;border-color:var(--line)}
+.cbtn.on{background:var(--sel);border-color:#9cc0ff}
+.cbtn:disabled{opacity:.35;cursor:default}
+.cbtn .ic{color:#2d4a6b}
+.sep{width:1px;background:var(--line);margin:2px 5px}
+/* zone principale */
+#main{display:grid;grid-template-columns:270px 1fr;min-height:0}
+#side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+#sidetabs{display:flex;border-bottom:1px solid var(--line)}
+#sidetabs button{flex:1;border:none;background:none;padding:7px;cursor:pointer;color:var(--muted);font-weight:600}
+#sidetabs button.on{color:var(--ink);box-shadow:0 -2px 0 var(--accent) inset}
+#tree,#pm{flex:1;overflow:auto;padding:6px 4px}
+.ti{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:5px;cursor:pointer;white-space:nowrap;position:relative}
+.ti:hover{background:#eaeef3}
+.ti.sel{background:var(--sel)}
+.ti.supp{opacity:.45;font-style:italic}
+.ti.err .nm{color:var(--err)}
+.ti.after{opacity:.4}
+.ti .ic{flex:none;color:#355577}
+.ti .nm{overflow:hidden;text-overflow:ellipsis}
+.ti .sub{color:var(--muted);font-size:11px}
+.ti.child{padding-left:26px}
+.rollbar{height:4px;margin:3px 6px;background:var(--accent);border-radius:2px;cursor:ns-resize}
+.tree-h{font-weight:700;padding:4px 6px;display:flex;align-items:center;gap:6px}
+/* PropertyManager */
+.pmh{display:flex;align-items:center;gap:6px;padding:4px 6px 8px;border-bottom:1px solid var(--line);margin-bottom:6px}
+.pmh .t{font-weight:700;flex:1}
+.okbtn,.nobtn{width:32px;height:30px;border-radius:7px;border:1px solid var(--line);background:#fff;cursor:pointer;display:grid;place-items:center}
+.okbtn{color:#0f8a3c}.nobtn{color:var(--err)}
+.okbtn:hover{background:#e7f7ec}.nobtn:hover{background:#fde9e7}
+.grp{background:#fff;border:1px solid var(--line);border-radius:8px;margin:0 2px 8px;padding:7px 8px}
+.grp h4{margin:0 0 6px;font-size:12px;color:#3c4a5a}
+.fld{display:flex;align-items:center;gap:6px;margin:5px 0}
+.fld label{flex:0 0 108px;color:#4a5562;font-size:12px}
+.fld input[type=text],.fld input[type=number],.fld select{flex:1;min-width:0;border:1px solid var(--line);border-radius:5px;padding:4px 6px;background:#fff}
+.fld input:focus,.fld select:focus{outline:2px solid #9cc0ff;border-color:#6aa1ff}
+.fld.chk label{flex:1}
+.sellist{border:1px dashed #9db0c5;border-radius:6px;min-height:32px;padding:4px;background:#f6f9fd;font-size:12px}
+.sellist.active{border-color:var(--accent2);background:#eef5ff}
+.sellist .it{display:flex;justify-content:space-between;padding:1px 4px}
+.sellist .it button{border:none;background:none;color:var(--err);cursor:pointer}
+.hint{color:var(--muted);font-size:12px;margin:4px 2px}
+.err{color:var(--err);font-size:12px;margin:4px 2px}
+.btn{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 10px;cursor:pointer}
+.btn:hover{background:#f1f4f8}
+.btn.pri{background:var(--accent2);color:#fff;border-color:var(--accent2)}
+.btn.pri:hover{filter:brightness(1.08)}
+.btnrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+/* vue */
+#viewwrap{position:relative;min-width:0;min-height:0;background:linear-gradient(#f6f8fb,#cdd6e0)}
+#view{position:absolute;inset:0}
+#view canvas{display:block;touch-action:none}
+#hud{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;gap:2px;background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:9px;padding:3px;box-shadow:0 2px 8px rgba(0,0,0,.08);z-index:5}
+#hud button{border:none;background:none;border-radius:6px;padding:4px 5px;cursor:pointer;color:#2d4a6b;display:grid;place-items:center}
+#hud button:hover{background:#eef2f7}
+#hud button.on{background:var(--sel)}
+#hud .sep{margin:2px 3px}
+#confirm{position:absolute;top:10px;right:12px;display:none;flex-direction:column;gap:6px;z-index:6}
+#confirm button{width:44px;height:44px;border-radius:10px;border:1px solid var(--line);background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.12);cursor:pointer;display:grid;place-items:center}
+#confirm .ok{color:#0f8a3c}#confirm .no{color:var(--err)}
+#loading{position:absolute;inset:0;display:grid;place-items:center;background:rgba(238,241,244,.92);z-index:50;font-weight:600;color:#33475b}
+#loading .box{text-align:center}
+.spin{width:34px;height:34px;border:4px solid #c9d4df;border-top-color:var(--accent);border-radius:50%;animation:sp 0.9s linear infinite;margin:0 auto 10px}
+@keyframes sp{to{transform:rotate(360deg)}}
+#status{display:flex;gap:14px;align-items:center;background:var(--panel);border-top:1px solid var(--line);padding:3px 10px;font-size:12px;color:var(--muted);min-height:24px}
+#status .msg{flex:1;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sk-labels{position:absolute;inset:0;pointer-events:none;z-index:4}
+.sk-dim{position:absolute;transform:translate(-50%,-50%);background:rgba(255,255,255,.9);border:1px solid #9cb2c9;color:#0b4fa8;padding:0 4px;border-radius:4px;font-size:11px;pointer-events:auto;cursor:pointer;white-space:nowrap}
+.sk-dim:hover{border-color:var(--accent);color:var(--accent)}
+.snap-glyph{position:absolute;display:none;background:#fff8e6;border:1px solid #f0c060;color:#8a5a00;font-size:10px;padding:0 4px;border-radius:3px;pointer-events:none;z-index:5}
+.dimpop{position:absolute;z-index:30;background:#fff;border:1px solid #6aa1ff;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.18);padding:6px;display:flex;gap:4px;align-items:center}
+.dimpop input{width:90px;border:1px solid var(--line);border-radius:5px;padding:4px 6px}
+.dimpop button{border:1px solid var(--line);background:#fff;border-radius:5px;cursor:pointer;padding:3px 6px}
+/* menus & modales */
+.menu{position:fixed;z-index:60;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:4px;min-width:200px}
+.menu button{display:flex;width:100%;gap:8px;align-items:center;border:none;background:none;padding:6px 10px;border-radius:5px;cursor:pointer;text-align:left}
+.menu button:hover{background:#eef3fa}
+.menu hr{border:none;border-top:1px solid var(--line);margin:4px 0}
+.modal-bg{position:fixed;inset:0;background:rgba(20,28,38,.45);z-index:70;display:grid;place-items:center;padding:12px}
+.modal{background:#fff;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.3);max-width:min(1100px,96vw);max-height:92vh;display:flex;flex-direction:column;min-width:min(420px,94vw)}
+.modal .mh{display:flex;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);font-weight:700;gap:8px}
+.modal .mh .x{margin-left:auto;border:none;background:none;cursor:pointer;color:var(--muted)}
+.modal .mb{padding:12px 14px;overflow:auto}
+.modal .mf{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+table.tb{border-collapse:collapse;width:100%;font-size:12px}
+table.tb th,table.tb td{border:1px solid var(--line);padding:4px 7px;text-align:left}
+table.tb th{background:#f3f6f9}
+table.tb td.n{text-align:right;font-variant-numeric:tabular-nums}
+#toast{position:fixed;bottom:34px;left:50%;transform:translateX(-50%);background:#1f2a36;color:#fff;padding:8px 14px;border-radius:8px;z-index:90;display:none;max-width:90vw}
+#toast.bad{background:var(--err)}
+.sheetview{background:#9aa6b2;padding:12px;overflow:auto;max-height:70vh}
+.sheetview svg{background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);display:block;margin:auto}
+#measure{position:absolute;left:10px;bottom:10px;background:rgba(255,255,255,.95);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:none;z-index:6;min-width:220px;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+@media (max-width:760px){
+  #main{grid-template-columns:1fr;grid-template-rows:1fr 38%}
+  #side{order:2;border-right:none;border-top:1px solid var(--line)}
+  #topbar .lbl{display:none}
+  #docname{width:110px}
+  .cbtn{min-width:56px;font-size:10px}
+  #hud{top:auto;bottom:8px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="brand"><b>G&amp;L</b> CAO 3D</div>
+    <button class="tbtn" id="bNew" title="Nouveau"></button>
+    <button class="tbtn" id="bOpen" title="Ouvrir"></button>
+    <button class="tbtn" id="bSave" title="Enregistrer (Ctrl+S)"></button>
+    <button class="tbtn" id="bExport" title="Exporter"></button>
+    <span class="sep" style="background:#3a4857;align-self:stretch"></span>
+    <button class="tbtn" id="bUndo" title="Annuler (Ctrl+Z)"></button>
+    <button class="tbtn" id="bRedo" title="Rétablir (Ctrl+Y)"></button>
+    <span class="spacer"></span>
+    <input id="docname" value="Pièce1" spellcheck="false">
+    <button class="tbtn" id="bHelp" title="Aide"></button>
+  </div>
+  <div id="cmdbar"><div id="tabs"></div><div id="tools"></div></div>
+  <div id="main">
+    <div id="side">
+      <div id="sidetabs"><button data-t="tree" class="on">Arbre de création</button><button data-t="pm">Propriétés</button></div>
+      <div id="tree"></div>
+      <div id="pm" style="display:none"></div>
+    </div>
+    <div id="viewwrap">
+      <div id="view"></div>
+      <div id="hud"></div>
+      <div id="confirm"><button class="ok" title="Valider"></button><button class="no" title="Annuler"></button></div>
+      <div id="measure"></div>
+      <div id="loading"><div class="box"><div class="spin"></div><div id="loadmsg">Démarrage…</div></div></div>
+    </div>
+  </div>
+  <div id="status"><span class="msg" id="smsg">Prêt</span><span id="sinfo"></span><span>mm</span></div>
+</div>
+<div id="toast"></div>
+<input type="file" id="fileIn" style="display:none">
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

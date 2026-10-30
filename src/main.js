@@ -1276,12 +1276,16 @@ async function exportCAD(kind) {
   } catch (e) { toast("Export impossible : " + e.message, true); }
 }
 function dataURLtoBlob(u) { const b = atob(u.split(",")[1]); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return new Blob([a], { type: "image/png" }); }
+function confirmReplace(go) {
+  if (!doc.features.length) return go();
+  modal("Remplacer la pièce en cours ?", `<p>La pièce « ${esc(doc.name)} » (${doc.features.length} fonctions) va être remplacée.</p><p class="hint">Pensez à l'enregistrer d'abord si vous voulez la garder. Ctrl+Z permet aussi de revenir en arrière.</p>`, [{ label: "Annuler" }, { label: "Enregistrer d'abord", click: () => { saveProject(); return false; } }, { label: "Remplacer", pri: true, click: go }]);
+}
 function newMenu(x, y) {
   popupMenu(x, y, [
-    { label: "Nouvelle pièce vide", icon: "new", click: () => { snapshot(); doc = newDoc(); importCache.clear(); treeSel = null; afterLoad(); viewer.setView([1, 1, 1]); } },
-    { label: "Exemple : platine percée", icon: "plate", click: () => loadExample("platine") },
-    { label: "Exemple : cadre mécano-soudé", icon: "weld", click: () => loadExample("cadre") },
-    { label: "Exemple : équerre en tôle pliée", icon: "sheet", click: () => loadExample("equerre") },
+    { label: "Nouvelle pièce vide", icon: "new", click: () => confirmReplace(() => { snapshot(); doc = newDoc(); importCache.clear(); treeSel = null; afterLoad(); viewer.setView([1, 1, 1]); }) },
+    { label: "Exemple : platine percée", icon: "plate", click: () => confirmReplace(() => loadExample("platine")) },
+    { label: "Exemple : cadre mécano-soudé", icon: "weld", click: () => confirmReplace(() => loadExample("cadre")) },
+    { label: "Exemple : équerre en tôle pliée", icon: "sheet", click: () => confirmReplace(() => loadExample("equerre")) },
   ]);
 }
 function loadExample(k) {
@@ -1393,7 +1397,7 @@ async function main() {
   $("#bHelp").innerHTML = icon("help", 18) + '<span class="lbl">Aide</span>';
   $("#confirm .ok").innerHTML = icon("exit", 26); $("#confirm .no").innerHTML = icon("close", 24);
   $("#bNew").onclick = e => newMenu(e.clientX, e.clientY + 10);
-  $("#bOpen").onclick = () => pickFile(".json,.glcad,.step,.stp,.stl", openFile);
+  $("#bOpen").onclick = () => pickFile(".json,.glcad,.step,.stp,.stl", f => /\.(json|glcad)$/i.test(f.name) && doc.features.length ? confirmReplace(() => openFile(f)) : openFile(f));
   $("#bSave").onclick = saveProject;
   $("#bExport").onclick = () => showExport();
   $("#bUndo").onclick = undo; $("#bRedo").onclick = redo; $("#bHelp").onclick = showHelp;

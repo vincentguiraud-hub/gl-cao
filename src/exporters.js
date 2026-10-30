@@ -58,7 +58,7 @@ export function sketchToDXF(entities) {
       const c = circleFrom3(e.a, e.m, e.b); if (!c) continue;
       const ang = p => Math.atan2(p[1] - c.c[1], p[0] - c.c[0]) * 180 / Math.PI;
       const cross = (e.m[0] - e.a[0]) * (e.b[1] - e.a[1]) - (e.m[1] - e.a[1]) * (e.b[0] - e.a[0]);
-      if (cross < 0) d.arc(c.c, c.r, ang(e.a), ang(e.b), layer); else d.arc(c.c, c.r, ang(e.b), ang(e.a), layer);
+      if (cross > 0) d.arc(c.c, c.r, ang(e.a), ang(e.b), layer); else d.arc(c.c, c.r, ang(e.b), ang(e.a), layer);
     } else if (e.t === "slot") {
       const s = arcSample({ a: e.a, b: e.b, m: e.a }, 2); void s;
       const dx = e.b[0] - e.a[0], dy = e.b[1] - e.a[1]; const L = Math.hypot(dx, dy) || 1; const n = [-dy / L * e.r, dx / L * e.r];
@@ -227,7 +227,7 @@ export function faceToDXF(face, plane, to2D) {
     else if (ed.geomType === "CIRCLE") {
       const a = P(s), m = P(ed.pointAt(0.5).toTuple()), b = P(e);
       if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-4) { const q = P(ed.pointAt(1 / 3).toTuple()), r = P(ed.pointAt(2 / 3).toTuple()); const c = circleFrom3(a, q, r); if (c) d.circle(c.c.map(round), round(c.r)); }
-      else { const c = circleFrom3(a, m, b); if (!c) { d.line(a, b); continue; } const ang = p => Math.atan2(p[1] - c.c[1], p[0] - c.c[0]) * 180 / Math.PI; const cross = (m[0] - a[0]) * (b[1] - a[1]) - (m[1] - a[1]) * (b[0] - a[0]); if (cross < 0) d.arc(c.c, c.r, ang(a), ang(b)); else d.arc(c.c, c.r, ang(b), ang(a)); }
+      else { const c = circleFrom3(a, m, b); if (!c) { d.line(a, b); continue; } const ang = p => Math.atan2(p[1] - c.c[1], p[0] - c.c[0]) * 180 / Math.PI; const cross = (m[0] - a[0]) * (b[1] - a[1]) - (m[1] - a[1]) * (b[0] - a[0]); if (cross > 0) d.arc(c.c, c.r, ang(a), ang(b)); else d.arc(c.c, c.r, ang(b), ang(a)); }
     } else { let prev = P(s); for (let i = 1; i <= 24; i++) { const q = P(ed.pointAt(i / 24).toTuple()); d.line(prev, q); prev = q; } }
   }
   return d.toString();

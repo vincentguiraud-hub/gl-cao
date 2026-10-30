@@ -405,7 +405,8 @@ export function isValidShape(sh) {
 function applyFeature(f, st, ev, doc) {
   const before = st.main;
   applyFeature0(f, st, ev, doc);
-  if (st.main && st.main !== before && !isValidShape(st.main)) { st.main = before; throw new Error(GEOM_HINT[f.type] || "Résultat géométrique invalide"); }
+  // contrôle strict pour les opérations qui produisent facilement des formes cassées
+  if (st.main && st.main !== before && ["fillet", "chamfer", "shell", "draft"].includes(f.type) && !isValidShape(st.main)) { st.main = before; throw new Error(GEOM_HINT[f.type] || "Résultat géométrique invalide"); }
   if (st.main && st.main !== before) { try { if (R.measureVolume(st.main) < 1e-6) { st.main = before; throw new Error("Le résultat est vide"); } } catch (e) { if (e.message === "Le résultat est vide") throw e; } }
 }
 function applyFeature0(f, st, ev, doc) {

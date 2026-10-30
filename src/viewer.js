@@ -116,7 +116,7 @@ export class Viewer {
       m.faceGroups.forEach((g, fi) => { geo.addGroup(g.start, g.count, 0); for (let t = g.start / 3; t < (g.start + g.count) / 3; t++) triFace[t] = fi; });
       const color = new THREE.Color(b.color || "#b9c3cc");
       const mats = [
-        new THREE.MeshStandardMaterial({ color, metalness: 0.35, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: this.clip ? [this.clip] : [] }),
+        new THREE.MeshStandardMaterial({ color, metalness: 0.15, roughness: 0.6, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: this.clip ? [this.clip] : [] }),
         new THREE.MeshStandardMaterial({ color: COL.hover, metalness: 0.2, roughness: 0.6, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: this.clip ? [this.clip] : [] }),
         new THREE.MeshStandardMaterial({ color: COL.sel, metalness: 0.2, roughness: 0.6, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, clippingPlanes: this.clip ? [this.clip] : [] }),
       ];

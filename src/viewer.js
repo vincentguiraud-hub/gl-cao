@@ -21,6 +21,7 @@ export class Viewer {
     this.controls.enableDamping = false;
     this.controls.zoomToCursor = true;
     this.controls.rotateSpeed = 0.8;
+    this.controls.zoomSpeed = 2.2;
     this.setIdleControls();
     const amb = new THREE.HemisphereLight(0xffffff, 0x8892a0, 1.6); this.scene.add(amb);
     this.key = new THREE.DirectionalLight(0xffffff, 1.6); this.scene.add(this.key);
@@ -151,6 +152,7 @@ export class Viewer {
   modelBounds() {
     const box = new THREE.Box3();
     for (const b of this.bodies) box.expandByObject(b.mesh);
+    if (this.extraBounds) { const e = this.extraBounds(); if (e && !e.isEmpty()) box.union(e); }
     if (box.isEmpty()) box.set(new THREE.Vector3(-100, -100, -100), new THREE.Vector3(100, 100, 100));
     return box;
   }
@@ -203,7 +205,7 @@ export class Viewer {
   }
   pick(ev, filter = { face: true, edge: true, plane: true }) {
     this.raycaster.setFromCamera(this.ndc(ev), this.camera);
-    this.raycaster.params.Line.threshold = this.worldPerPixel() * 5;
+    this.raycaster.params.Line.threshold = this.worldPerPixel() * 7;
     const hits = [];
     if (filter.edge) {
       const ls = this.bodies.filter(b => b.lines.visible).map(b => b.lines);

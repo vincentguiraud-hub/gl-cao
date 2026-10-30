@@ -5,7 +5,7 @@ import { svg2pdf } from "svg2pdf.js";
 import { initOCC, R } from "./occ.js";
 import { Viewer } from "./viewer.js";
 import { Sketcher, newId, entPoints } from "./sketcher.js";
-import { flatHoles, rebuild, featureLabel, prepareImports, importCache, massProps, exportCompound, HOLE_STD, resolvePlane, findFace, findEdge } from "./cad.js";
+import { edgeSignature, flatHoles, rebuild, featureLabel, prepareImports, importCache, massProps, exportCompound, HOLE_STD, resolvePlane, findFace, findEdge } from "./cad.js";
 import { STD_PLANES, makeEval, v3, v2, planeFromNormal, planeY, to3D, to2D, circleFrom3 } from "./geom.js";
 import { PROFILE_FAMILIES, profileName } from "./profiles.js";
 import { icon } from "./icons.js";
@@ -391,6 +391,8 @@ function startSketch(planeRef) {
   if (!planeRef) {
     const s = selection[0];
     if (s && (s.kind === "plane" || (s.kind === "face" && isPlanarHit(s)))) planeRef = refFromHit(s);
+    const tf = doc.features.find(q => q.id === treeSel);
+    if (!planeRef && tf?.type === "plane" && st?.planes[tf.id]) planeRef = { kind: "ref", id: tf.id };
   }
   if (!planeRef) {
     mode = "pickplane"; status("Sélectionnez un plan ou une face plane pour l'esquisse (Échap pour annuler)");
@@ -424,7 +426,7 @@ function enterSketch(f, isNew, idx) {
   viewer.setSketchControls();
   viewer.setView(plane.n, planeY(plane), true, plane.o);
   sk = new Sketcher(viewer, plane, f.entities, {
-    onSketchChange: () => renderSketchPM(), onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim, editDistance, editConstraintDim, toast,
+    onSketchChange: () => { if (sk?.editingField) refreshSketchPMValues(); else renderSketchPM(); }, onSketchSelect: () => renderSketchPM(), onSketchTool: () => { renderTools(); renderSketchPM(); }, editDim, editDistance, editConstraintDim, toast,
   }, f.constraints);
   sk.showGrid = true;
   sk.setTool("line");
@@ -448,7 +450,7 @@ function exitSketch(save) {
       else { const i = doc.features.findIndex(q => q.id === f.id); doc.features[i] = f; }
     });
     treeSel = f.id;
-  } else recompute();
+  } else { recompute(); if (save && isNew && !ents.length) toast("Esquisse vide : elle n'a pas été créée"); }
   curTab = "fonctions"; renderTabs(); renderTree(); showSelectedSketch();
   $("#sinfo").textContent = "";
 }
@@ -511,6 +513,12 @@ function renderSketchPM() {
   const ox = $("#opX"); if (ox) ox.onclick = () => { sk.pendingOp = null; renderSketchPM(); };
   bindEntityEditor(selEnts[0]);
   bindRelationsPM(selEnts);
+}
+// mise à jour des valeurs du panneau sans le reconstruire (garde le focus et le clic en cours)
+function refreshSketchPMValues() {
+  const selEnts = sk.ents.filter(e => sk.sel.has(e.id)); if (selEnts.length !== 1) return;
+  const tmp = document.createElement("div"); tmp.innerHTML = entityEditor(selEnts[0]);
+  tmp.querySelectorAll("input[data-k]").forEach(n => { const cur = $("#pm").querySelector(`input[data-k="${n.dataset.k}"]`); if (cur && cur !== document.activeElement) cur.value = n.value; });
 }
 function entityEditor(e) {
   const F = (k, l, v) => `<div class="fld"><label>${l}</label><input type="text" data-k="${k}" value="${fmt(v, 4)}"></div>`;
@@ -590,6 +598,7 @@ function bindEntityEditor(e) {
   $("#pm").querySelectorAll("input[data-k]").forEach(inp => {
     inp.onkeydown = x => { if (x.key === "Enter") inp.blur(); x.stopPropagation(); };
     inp.onchange = () => {
+      sk.editingField = true; setTimeout(() => { if (sk) sk.editingField = false; }, 0);
       const v = E(inp.value); sk.snapshot();
       const k = inp.dataset.k;
       const keep = [];
@@ -674,7 +683,7 @@ function defaultSketch(idx) {
   const sel = sks.find(f => f.id === treeSel); if (sel) return sel.id;
   const used = usedSketches();
   const free = sks.filter(f => !used.has(f.id));
-  return (free[free.length - 1] || sks[sks.length - 1])?.id || "";
+  return free[free.length - 1]?.id || "";
 }
 function startFeature(type, extra = {}) {
   const idx = doc.rollback ?? doc.features.length;
@@ -704,21 +713,24 @@ function startFeature(type, extra = {}) {
   if (extra.data) { f.data = extra.data; f.name = extra.partName || f.name; }
   // reprendre la sélection courante
   const sh = st && bodiesOf(st);
-  if ((type === "fillet" || type === "chamfer") && selection.length) f.edges = selection.filter(s => s.kind === "edge").map(s => ({ p: s.p }));
+  if ((type === "fillet" || type === "chamfer") && selection.length) f.edges = selection.filter(s => s.kind === "edge").map(s => { const body = bodiesOf(st)[s.body].shape; const ed = body.edges[s.edge]; return ed ? edgeSignature(body, ed, s.p) : { p: s.p }; });
   if ((type === "shell" || type === "draft") && selection.length) f.faces = selection.filter(s => s.kind === "face").map(s => ({ p: s.p, n: s.n }));
   if (type === "hole" && selection[0]?.kind === "face" && isPlanarHit(selection[0])) { const r = refFromHit(selection[0]); f.face = r; f.points = [r.p]; }
   if (type === "plane" && selection[0]) { if (selection[0].kind === "plane") f.base = selection[0].ref; else if (selection[0].kind === "face" && isPlanarHit(selection[0])) f.base = refFromHit(selection[0]); }
   if (["lpattern", "cpattern", "mirror"].includes(type) && treeSel) { const t = doc.features.find(q => q.id === treeSel); if (t && ["extrude", "cut", "revolve", "revcut", "hole", "sweep", "loft"].includes(t.type)) f.features = [t.id]; }
   void sh;
   if (["extrude", "cut", "revolve", "revcut", "weld", "sheet"].includes(type) && !f.sketch) {
-    toast("Créez d'abord une esquisse (onglet Esquisse)", true); return;
+    const any = sketchesBefore(idx).length;
+    toast(any ? "Toutes les esquisses sont déjà utilisées : créez une nouvelle esquisse, ou sélectionnez-en une dans l'arbre avant de lancer la commande." : "Créez d'abord une esquisse (onglet Esquisse → Esquisse)", true);
+    if (!any) return;
+    f.sketch = "";
   }
   openPM(f, true);
 }
 const FEATURE_TYPES_FOR_PATTERN = ["extrude", "cut", "revolve", "revcut", "hole", "sweep", "loft"];
 function pmSpec(f) {
   const idx = pm.idx;
-  const sks = sketchesBefore(idx).map(s => [s.id, s.name]);
+  const sks = [["", "— choisir une esquisse —"], ...sketchesBefore(idx).map(s => [s.id, s.name])];
   const planesOpt = [["std:front", "Plan de face"], ["std:top", "Plan de dessus"], ["std:right", "Plan de droite"], ...doc.features.slice(0, idx).filter(q => q.type === "plane").map(q => ["ref:" + q.id, q.name])];
   const endOpts = [["blind", "Borgne"], ["through", "À travers tout"], ["mid", "Plan milieu"]];
   if (f.type === "cut") endOpts.push(["throughAll2", "À travers tout – 2 directions"]);
@@ -745,7 +757,7 @@ function pmSpec(f) {
       const stdO = Object.keys(HOLE_STD).map(k => [k, k]);
       G.push({ t: "Type de trou", f: [{ k: "kind", l: "Type", type: "select", o: [["simple", "Perçage simple"], ["cbore", "Lamage (vis CHC)"], ["csink", "Fraisure (vis FHC)"]] }, { k: "std", l: "Taille", type: "select", o: [["", "Personnalisée"], ...stdO] }, { k: "usage", l: "Usage", type: "select", o: [["clear", "Passage de vis (normal)"], ["tap", "Avant-trou de taraudage"]] }, { k: "d", l: "Diamètre (mm)", type: "num" }, ...(f.kind === "cbore" ? [{ k: "cbD", l: "Ø lamage", type: "num" }, { k: "cbH", l: "Prof. lamage", type: "num" }] : []), ...(f.kind === "csink" ? [{ k: "csD", l: "Ø fraisure", type: "num" }, { k: "csA", l: "Angle fraisure (°)", type: "num" }] : [])] });
       G.push({ t: "Condition de fin", f: [{ k: "end", l: "Fin", type: "select", o: [["through", "À travers tout"], ["blind", "Borgne"]] }, ...(f.end === "blind" ? [{ k: "depth", l: "Profondeur (mm)", type: "num" }, { k: "tip", l: "Pointe de foret 118°", type: "check" }] : [])] });
-      G.push({ t: "Positions", f: [{ k: "ptsSketch", l: "Depuis une esquisse", type: "select", o: [["", "Non – cliquer sur la face"], ...sks] }, ...(f.ptsSketch ? [{ k: "useCircles", l: "Utiliser aussi les centres de cercles", type: "check" }, { type: "info", html: "Chaque point d'esquisse (outil Point) devient un perçage, perpendiculaire au plan de l'esquisse." }] : [{ k: "points", l: "Positions", type: "points" }])] });
+      G.push({ t: "Positions", f: [{ k: "ptsSketch", l: "Depuis une esquisse", type: "select", o: [["", "Non – cliquer sur la face"], ...sks.slice(1)] }, ...(f.ptsSketch ? [{ k: "useCircles", l: "Utiliser aussi les centres de cercles", type: "check" }, { type: "info", html: "Chaque point d'esquisse (outil Point) devient un perçage, perpendiculaire au plan de l'esquisse." }] : [{ k: "points", l: "Positions", type: "points" }])] });
       break;
     }
     case "lpattern":
@@ -776,7 +788,7 @@ function pmSpec(f) {
       G.push({ t: "Répétition", f: [{ k: "count", l: "Nombre d'exemplaires", type: "num" }, { k: "px", l: "Pas X (mm)", type: "num" }, { k: "py", l: "Pas Y (mm)", type: "num" }, { k: "pz", l: "Pas Z (mm)", type: "num" }] });
       break;
     case "loft": G.push({ t: "Profils (dans l'ordre)", f: [{ k: "sketches", l: "Esquisses", type: "multisketch" }, { k: "op", l: "Opération", type: "select", o: [["add", "Bossage"], ["cut", "Enlèvement"]] }, { k: "ruled", l: "Surfaces réglées (droites)", type: "check" }] }); break;
-    case "sweep": G.push({ t: "Profil et trajectoire", f: [{ k: "profile", l: "Profil (fermé)", type: "select", o: [["", "—"], ...sks] }, { k: "path", l: "Trajectoire", type: "select", o: [["", "—"], ...sks] }, { k: "op", l: "Opération", type: "select", o: [["add", "Bossage"], ["cut", "Enlèvement"]] }] }); G.push({ t: "", f: [{ type: "info", html: "Le profil doit être dessiné sur un plan perpendiculaire au début de la trajectoire, et le traverser." }] }); break;
+    case "sweep": G.push({ t: "Profil et trajectoire", f: [{ k: "profile", l: "Profil (fermé)", type: "select", o: sks }, { k: "path", l: "Trajectoire", type: "select", o: sks }, { k: "op", l: "Opération", type: "select", o: [["add", "Bossage"], ["cut", "Enlèvement"]] }] }); G.push({ t: "", f: [{ type: "info", html: "Le profil doit être dessiné sur un plan perpendiculaire au début de la trajectoire, et le traverser." }] }); break;
     case "weld": {
       const fam = PROFILE_FAMILIES[f.family];
       G.push({ t: "Profilé", f: [{ k: "sketch", l: "Esquisse (lignes)", type: "select", o: sks }, { k: "family", l: "Type", type: "select", o: Object.entries(PROFILE_FAMILIES).map(([k, v]) => [k, v.label]) }, { k: "size", l: "Taille", type: "select", o: fam.sizes.map(s => [s, s]) }, { k: "rot", l: "Rotation du profil (°)", type: "num" }] });
@@ -790,7 +802,7 @@ function pmSpec(f) {
       G.push({ t: "Tôle", f: [{ k: "thickness", l: "Épaisseur (mm)", type: "num" }, { k: "radius", l: "Rayon intérieur (mm)", type: "num" }, { k: "k", l: "Facteur K", type: "num" }, { k: "width", l: "Longueur de pliage (mm)", type: "num" }, { k: "mid", l: "Symétrique / plan d'esquisse", type: "check" }, { k: "reverse", l: "Inverser", type: "check" }] });
       break;
   }
-  if (["extrude", "revolve", "lpattern", "cpattern", "mirror", "weld", "sheet", "loft", "sweep", "cut", "revcut", "hole", "plane", "split", "movebody", "part"].includes(f.type)) pm.preview ??= true; else pm.preview ??= false;
+  pm.preview ??= true;
   return G;
 }
 function openPM(f, isNew) {
@@ -816,7 +828,7 @@ function renderPM() {
     for (const x of g.f) {
       const v = f[x.k];
       switch (x.type) {
-        case "num": h += `<div class="fld"><label>${x.l}</label><input type="text" data-k="${x.k}" value="${esc(v)}" title="Nombre ou expression (ex : L/2+10)"></div>`; if (typeof v === "string" && v && isNaN(+v)) h += `<div class="hint" style="margin-left:114px">= ${fmt(E(v), 3)}</div>`; break;
+        case "num": h += `<div class="fld"><label>${x.l}</label><input type="text" data-k="${x.k}" value="${esc(v)}" title="Nombre ou expression (ex : L/2+10)"></div>`; if (typeof v === "string" && v && isNaN(+v)) h += `<div class="hint exprhint" style="margin-left:114px">= ${fmt(E(v), 3)}</div>`; break;
         case "select": h += `<div class="fld"><label>${x.l}</label><select data-k="${x.k}">${x.o.map(([ov, ol]) => `<option value="${esc(ov)}" ${String(v) === String(ov) ? "selected" : ""}>${esc(ol)}</option>`).join("")}</select></div>`; break;
         case "check": h += `<div class="fld chk"><input type="checkbox" id="c_${x.k}" data-k="${x.k}" ${v ? "checked" : ""}><label for="c_${x.k}">${x.l}</label></div>`; break;
         case "color": h += `<div class="fld"><label>${x.l}</label><input type="color" data-k="${x.k}" value="${esc(v || "#8f9ba8")}"></div>`; break;
@@ -867,7 +879,15 @@ function renderPM() {
       if (f.type === "hole" && ["std", "usage", "kind"].includes(k) && f.std) { const H = HOLE_STD[f.std]; f.d = f.usage === "tap" ? H.tap : H.clear; f.cbD = H.cb[0]; f.cbH = H.cb[1]; f.csD = H.cs; }
       if (f.type === "hole" && k === "d") f.std = "";
       if (f.type === "weld" && k === "family") f.size = PROFILE_FAMILIES[f.family].sizes[Math.min(4, PROFILE_FAMILIES[f.family].sizes.length - 1)];
+      // champ texte / nombre : pas de reconstruction du panneau (sinon le champ suivant perd le clic / la saisie)
+      const layoutField = el.tagName === "SELECT" || el.type === "checkbox" || (f.type === "hole" && k === "d");
+      if (!layoutField) {
+        if (pm.fieldType(k) === "num") { const hint = el.closest(".fld")?.nextElementSibling; const isExpr = typeof f[k] === "string" && f[k] && isNaN(+f[k]); if (hint?.classList?.contains("exprhint")) hint.remove(); if (isExpr) { const d = document.createElement("div"); d.className = "hint exprhint"; d.style.marginLeft = "114px"; d.textContent = "= " + fmt(ev()(f[k]), 3); el.closest(".fld").after(d); } }
+        previewPM(); return;
+      }
+      const focusKey = document.activeElement?.dataset?.k;
       renderPM(); previewPM();
+      if (focusKey) { const el2 = $("#pm").querySelector(`[data-k="${focusKey}"]`); if (el2 && el2 !== el) el2.focus(); }
     };
   });
   P.querySelectorAll("[data-sel]").forEach(el => el.onclick = e => { if (e.target.closest("button,input")) return; pm.active = el.dataset.sel; renderPM(); });
@@ -885,12 +905,14 @@ function pmPick(h) {
   if (t === "edges" && h.kind === "face") {
     const face = bodiesOf(st)[h.body]?.shape.faces[h.face]; if (!face) return;
     const list = f[k] ||= [];
-    for (const ed of face.edges) { const p = ed.pointAt(0.5).toTuple().map(x => Math.round(x * 1e6) / 1e6); if (!list.some(r => v3.dist(r.p, p) < 1e-3)) list.push({ p }); }
+    const body = bodiesOf(st)[h.body].shape;
+    for (const ed of face.edges) { const p = ed.pointAt(0.5).toTuple().map(x => Math.round(x * 1e6) / 1e6); if (!list.some(r => v3.dist(r.p, p) < 1e-3)) list.push(edgeSignature(body, ed, p)); }
     toast("Arêtes de la face ajoutées");
   } else if (t === "edges" && h.kind === "edge") {
     const list = f[k] ||= [];
     const i = list.findIndex(r => v3.dist(r.p, h.p) < 1e-3 || findEdgeIdxSame(r.p, h));
-    if (i >= 0) list.splice(i, 1); else list.push({ p: h.p.map(x => Math.round(x * 1e6) / 1e6) });
+    const body = bodiesOf(st)[h.body].shape; const ed = body.edges[h.edge];
+    if (i >= 0) list.splice(i, 1); else list.push(ed ? edgeSignature(body, ed, h.p) : { p: h.p.map(x => Math.round(x * 1e6) / 1e6) });
   } else if (t === "faces" && h.kind === "face") {
     const list = f[k] ||= [];
     const i = list.findIndex(r => findFaceIdxSame(r, h));
@@ -939,6 +961,13 @@ function previewPM() {
 function pmOk() {
   if (!pm) return;
   const f = pm.feature;
+  if (["extrude", "cut", "revolve", "revcut", "weld", "sheet"].includes(f.type) && !f.sketch) return toast("Choisissez une esquisse dans la liste", true);
+  if (f.type === "sweep" && (!f.profile || !f.path)) return toast("Choisissez le profil et la trajectoire", true);
+  if ((f.type === "fillet" || f.type === "chamfer") && !(f.edges || []).length) return toast("Cliquez au moins une arête (ou une face) dans la vue", true);
+  if (f.type === "hole" && !f.ptsSketch && !(f.points || []).length) return toast("Cliquez sur la face pour placer au moins un perçage", true);
+  if (["lpattern", "cpattern"].includes(f.type) && !(f.features || []).length) return toast("Cochez au moins une fonction à répéter", true);
+  if (f.type === "mirror" && !f.body && !(f.features || []).length) return toast("Cochez une fonction ou « Symétriser tout le corps »", true);
+  if (f.type === "loft" && (f.sketches || []).length < 2) return toast("Cochez au moins 2 esquisses", true);
   const { isNew, idx } = pm;
   pm = null; mode = "idle"; $("#confirm").style.display = "none"; hidePM(); viewer.clearOverlay();
   commit(() => {
@@ -1055,18 +1084,14 @@ function showVars() {
 // ---------------- Mécano-soudé : liste de débit
 function cutListRows() {
   const items = [];
-  doc.features.forEach(f => { if (f.type === "weld" && st.info[f.id] && !f.suppressed) st.info[f.id].forEach(m => items.push(m)); });
+  doc.features.forEach(f => { if ((f.type === "weld" || f.type === "movebody") && Array.isArray(st.info[f.id]) && !f.suppressed) st.info[f.id].forEach(m => items.push(m)); });
   const groups = new Map();
   for (const m of items) { const key = m.profile + "|" + m.length.toFixed(1) + "|" + m.cuts.map(c => c.toFixed(1)).join("/"); const g = groups.get(key) || { ...m, qty: 0 }; g.qty++; groups.set(key, g); }
   return [...groups.values()].sort((a, b) => a.profile.localeCompare(b.profile) || b.length - a.length);
 }
 function showCutList() {
-  const items = [];
-  doc.features.forEach(f => { if (f.type === "weld" && st.info[f.id]) st.info[f.id].forEach(m => items.push({ ...m, feat: f.name })); });
-  if (!items.length) return toast("Aucun élément mécano-soudé", true);
-  const groups = new Map();
-  for (const m of items) { const key = m.profile + "|" + m.length.toFixed(1) + "|" + m.cuts.map(c => c.toFixed(1)).join("/"); const g = groups.get(key) || { ...m, qty: 0 }; g.qty++; groups.set(key, g); }
-  const rows = [...groups.values()].sort((a, b) => a.profile.localeCompare(b.profile) || b.length - a.length);
+  const rows = cutListRows();
+  if (!rows.length) return toast("Aucun élément mécano-soudé", true);
   const byProf = new Map(); for (const r of rows) { const p = byProf.get(r.profile) || { len: 0, mass: 0 }; p.len += r.length * r.qty; p.mass += r.mass * r.qty; byProf.set(r.profile, p); }
   let h = `<table class="tb"><tr><th>N°</th><th>Profilé</th><th>Longueur (mm)</th><th>Coupes</th><th>Qté</th><th>Masse unit. (kg)</th><th>Masse tot. (kg)</th></tr>`;
   rows.forEach((r, i) => h += `<tr><td>${i + 1}</td><td>${esc(r.profile)}</td><td class="n">${fmt(r.length, 1)}</td><td>${r.cuts.length ? r.cuts.map(c => fmt(c, 1) + "°").join(" / ") : "droit"}</td><td class="n">${r.qty}</td><td class="n">${fmt(r.mass, 2)}</td><td class="n">${fmt(r.mass * r.qty, 2)}</td></tr>`);

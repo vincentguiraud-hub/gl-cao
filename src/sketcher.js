@@ -22,11 +22,13 @@ export class Sketcher {
     viewer.container.appendChild(this.labels);
     this.snapGlyph = document.createElement("div"); this.snapGlyph.className = "snap-glyph"; viewer.container.appendChild(this.snapGlyph);
     this.onRender = () => this.updateLabels();
+    viewer.extraBounds = () => { const b = new THREE.Box3(); for (const e of this.ents) for (const q of entPoints(e)) b.expandByPoint(new THREE.Vector3(...to3D(this.plane, q))); return b; };
     viewer.onRender.push(this.onRender);
     this.bind();
     this.draw();
   }
   destroy() {
+    this.v.extraBounds = null; this.numBox?.remove();
     this.unbind(); this.labels.remove(); this.snapGlyph.remove();
     this.v.onRender = this.v.onRender.filter(f => f !== this.onRender);
     this.v.sketchGroup.clear(); this.v.render();
@@ -95,6 +97,7 @@ export class Sketcher {
     return pts;
   }
   snap(e, ref = null) {
+    if (this._forced) return [...this._forced];
     const r = this.raw2D(e); if (!r) return null;
     const tol = this.px() * 9;
     let best = null, bd = tol;
@@ -182,11 +185,41 @@ export class Sketcher {
   }
   onDbl() { if (this.tool === "line") { this.temp = []; this.preview = null; this.draw(); } }
   key(e) {
+    // saisie numérique pendant le dessin (longueur, largeur;hauteur, diamètre…)
+    if (/^[0-9.,-]$/.test(e.key) && !e.ctrlKey && !e.metaKey && this.temp.length && ["line", "centerline", "rect", "crect", "circle", "poly", "slot"].includes(this.tool)) { this.openNumeric(e.key); return true; }
     if (e.key === "Escape") { if (this.temp.length) { this.temp = []; this.preview = null; this.draw(); } else this.setTool("select"); return true; }
     if ((e.key === "Delete" || e.key === "Backspace") && this.sel.size) { this.deleteSelected(); return true; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { this.undo(); return true; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { this.redo(); return true; }
     return false;
+  }
+  openNumeric(first) {
+    this.numBox?.remove();
+    const box = document.createElement("div"); box.className = "dimpop"; box.style.left = "50%"; box.style.top = "12px"; box.style.transform = "translateX(-50%)";
+    const hint = { line: "longueur  (ou  ΔX;ΔY)", centerline: "longueur  (ou  ΔX;ΔY)", rect: "largeur;hauteur", crect: "largeur;hauteur", circle: "diamètre", poly: "rayon", slot: "entraxe" }[this.tool];
+    box.innerHTML = `<span style="font-size:12px;color:#555">${hint}</span><input type="text" style="width:130px"><button class="ok">✓</button>`;
+    this.v.container.appendChild(box); this.numBox = box;
+    const inp = box.querySelector("input"); inp.value = first; inp.focus();
+    const apply = () => { const v = inp.value; box.remove(); this.numBox = null; this.applyNumeric(v); };
+    box.querySelector(".ok").onclick = apply;
+    inp.onkeydown = x => { x.stopPropagation(); if (x.key === "Enter") apply(); if (x.key === "Escape") { box.remove(); this.numBox = null; } };
+  }
+  applyNumeric(str) {
+    const nums = str.replace(/,/g, ".").split(/[;x×\s]+/).filter(Boolean).map(Number);
+    if (!nums.length || nums.some(n => !Number.isFinite(n))) return;
+    const last = this.temp[this.temp.length - 1], cur = this.cursor || [last[0] + 1, last[1]];
+    let target;
+    const dir = v2.norm(v2.sub(cur, last)); const sx = Math.sign(cur[0] - last[0]) || 1, sy = Math.sign(cur[1] - last[1]) || 1;
+    switch (this.tool) {
+      case "line": case "centerline": case "slot": target = nums.length >= 2 ? [last[0] + nums[0], last[1] + nums[1]] : v2.add(last, v2.mul(v2.len(v2.sub(cur, last)) > 1e-9 ? dir : [1, 0], nums[0])); break;
+      case "rect": { const w = nums[0], h = nums[1] ?? nums[0]; target = [last[0] + sx * w, last[1] + sy * h]; break; }
+      case "crect": { const w = nums[0] / 2, h = (nums[1] ?? nums[0]) / 2; target = [last[0] + sx * w, last[1] + sy * h]; break; }
+      case "circle": target = [last[0] + nums[0] / 2, last[1]]; break;
+      case "poly": target = v2.add(last, v2.mul(v2.len(v2.sub(cur, last)) > 1e-9 ? dir : [1, 0], nums[0])); break;
+    }
+    if (!target) return;
+    this._forced = target.map(round);
+    try { this.click({ shiftKey: false, ctrlKey: false }); } finally { this._forced = null; }
   }
   deleteSelected() { this.snapshot(); this.ents = this.ents.filter(x => !this.sel.has(x.id)); this.sel.clear(); this.selPts.clear(); this.changed(); }
   add(...es) { for (const e of es) { e.id ||= newId(); this.ents.push(e); } }

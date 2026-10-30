@@ -97,3 +97,27 @@ console.log("échecs v1.3 :", fails2);
   const w = rebuild({ vars: {}, material: { density: 7.85 }, features: [sk("w", front, [L([0, 0], [500, 0]), L([500, 0], [500, 300])]), { id: "m", type: "weld", sketch: "w", family: "tube_carre", size: "40x40x2", corner: "miter", caps: true, capT: 3 }] });
   console.log((w.bodies.length === 4 && !Object.keys(w.errors).length ? "OK  " : "ERR ") + "embouts mécano corps=" + w.bodies.length + " " + JSON.stringify(w.errors));
 }
+{
+  // congé qui doit survivre à un changement de dimensions
+  const { edgeSignature } = await import("../src/cad.js");
+  const mk = w => [sk("s1", top, rect(-w / 2, -30, w / 2, 30)), { id: "e1", type: "extrude", sketch: "s1", end: "blind", depth: 20 }];
+  const st0 = rebuild({ vars: {}, material: { density: 7.85 }, features: mk(100) });
+  const eds = st0.main.edges.filter(e => { const m = e.pointAt(0.5).toTuple(); return Math.abs(m[0] - 50) < 1e-6 && Math.abs(m[2] - 30) < 1e-6; });
+  const sig = edgeSignature(st0.main, eds[0], eds[0].pointAt(0.5).toTuple());
+  for (const w of [100, 160, 60]) {
+    const st = rebuild({ vars: {}, material: { density: 7.85 }, features: [...mk(w), { id: "f", type: "fillet", edges: [sig], radius: 5 }] });
+    console.log((!Object.keys(st.errors).length ? "OK  " : "ERR ") + "congé robuste largeur " + w + " " + JSON.stringify(st.errors));
+  }
+}
+{
+  // perçage, esquisse et enlèvement sur un tube mécano-soudé
+  const w = [sk("w", front, [L([0, 0], [1000, 0])]), { id: "m", type: "weld", sketch: "w", family: "tube_carre", size: "40x40x2", corner: "none" }];
+  const t1 = rebuild({ vars: {}, material: { density: 7.85 }, features: [...w, { id: "h", type: "hole", face: { p: [500, 20, 0], n: [0, 1, 0] }, points: [[200, 20, 0], [800, 20, 0]], kind: "simple", d: 9, end: "through" }] });
+  const v0 = rebuild({ vars: {}, material: { density: 7.85 }, features: w });
+  const m0 = massProps(v0, 7.85).volume, m1 = massProps(t1, 7.85).volume;
+  console.log((!Object.keys(t1.errors).length && m1 < m0 ? "OK  " : "ERR ") + "perçage dans un tube " + (m0 - m1).toFixed(0) + " " + JSON.stringify(t1.errors));
+  const t2 = rebuild({ vars: {}, material: { density: 7.85 }, features: [...w, sk("s2", { kind: "face", p: [500, 20, 0], n: [0, 1, 0] }, [{ id: "sl", t: "slot", a: [100, 0], b: [200, 0], r: 5 }]), { id: "c", type: "cut", sketch: "s2", end: "blind", depth: 5 }] });
+  console.log((!Object.keys(t2.errors).length && massProps(t2, 7.85).volume < m0 ? "OK  " : "ERR ") + "esquisse + enlèvement sur un tube " + JSON.stringify(t2.errors));
+  const t3 = rebuild({ vars: {}, material: { density: 7.85 }, features: [...w, sk("s3", top, rect(-50, -50, 50, 50)), { id: "e", type: "extrude", sketch: "s3", end: "blind", depth: 10 }, sk("s4", top, rect(-10, -10, 10, 10)), { id: "c2", type: "cut", sketch: "s4", end: "throughAll2" }] });
+  console.log((Object.keys(t3.errors).length === 0 ? "OK  " : "ERR ") + "enlèvement à travers corps + tube " + JSON.stringify(t3.errors));
+}

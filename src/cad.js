@@ -27,8 +27,9 @@ export function resolvePlane(ref, st) {
   if (ref.kind === "std") return STD_PLANES[ref.std];
   if (ref.kind === "ref") { const p = st.planes[ref.id]; if (!p) throw new Error("Plan de référence introuvable"); return p; }
   if (ref.kind === "face") {
-    if (!st.main) throw new Error("Face d'appui introuvable (pas de corps)");
-    const face = findFace(st.main, ref, true);
+    if (!hasBody(st)) throw new Error("Face d'appui introuvable (pas de corps)");
+    let face = null, bd = Infinity;
+    for (const t of allTargets(st)) { const fc = findFace(t.get(), ref, true); if (fc) { const d = R.measureDistanceBetween(fc, R.makeVertex(ref.p)); if (d < bd) { bd = d; face = fc; } } }
     if (!face) throw new Error("Face d'appui introuvable");
     const c = face.center.toTuple(), n = face.normalAt().toTuple();
     return planeFromNormal(c, n);
@@ -48,9 +49,38 @@ export function findFace(shape, ref, planarOnly = false) {
   }
   return best;
 }
-export function findEdge(shape, p) {
-  let best = null, bd = Infinity; const vtx = R.makeVertex(p);
-  for (const e of shape.edges) { const d = R.measureDistanceBetween(e, vtx); if (d < bd) { bd = d; best = e; } }
+// Référence d'arête robuste : point + direction + type + position relative dans la boîte englobante.
+// Permet de retrouver l'arête quand la pièce change de dimensions (problème classique de la CAO paramétrique).
+export function edgeSignature(shape, edge, p) {
+  const bb = shape.boundingBox.bounds;
+  const u = p.map((v, i) => (v - bb[0][i]) / Math.max(1e-9, bb[1][i] - bb[0][i]));
+  let dir = null;
+  try { if (edge.geomType === "LINE") dir = v3.norm(v3.sub(edge.endPoint.toTuple(), edge.startPoint.toTuple())); } catch { }
+  return { p: p.map(x => Math.round(x * 1e6) / 1e6), u: u.map(x => Math.round(x * 1e6) / 1e6), dir, t: edge.geomType, len: edge.length };
+}
+export function findEdge(shape, ref) {
+  if (Array.isArray(ref)) ref = { p: ref };
+  const vtx = R.makeVertex(ref.p);
+  const edges = shape.edges;
+  let best = null, bd = Infinity;
+  for (const e of edges) { const d = R.measureDistanceBetween(e, vtx); if (d < bd) { bd = d; best = e; } }
+  if (bd < 0.05) return best;
+  if (ref.u) {
+    const bb = shape.boundingBox.bounds; const size = bb[1].map((v, i) => Math.max(1e-9, v - bb[0][i]));
+    let bs = Infinity, be = null;
+    for (const e of edges) {
+      if (ref.t && e.geomType !== ref.t) continue;
+      let dirOk = true;
+      if (ref.dir && e.geomType === "LINE") { const d = v3.norm(v3.sub(e.endPoint.toTuple(), e.startPoint.toTuple())); dirOk = Math.abs(v3.dot(d, ref.dir)) > 0.999; }
+      if (!dirOk) continue;
+      const m = e.pointAt(0.5).toTuple(); const u = m.map((v, i) => (v - bb[0][i]) / size[i]);
+      // distance en coordonnées relatives (on ignore l'axe de l'arête pour une ligne)
+      let sc = 0; for (let i = 0; i < 3; i++) { const w = ref.dir ? 1 - Math.abs(ref.dir[i]) : 1; sc += w * (u[i] - ref.u[i]) ** 2; }
+      sc = Math.sqrt(sc);
+      if (sc < bs) { bs = sc; be = e; }
+    }
+    if (be && bs < 0.12) return be;
+  }
   return bd < 5 ? best : null;
 }
 
@@ -61,14 +91,21 @@ function bigLength(st) {
   return L;
 }
 
+function boxesOverlap(a, b) { const A = a.boundingBox.bounds, B = b.boundingBox.bounds; for (let i = 0; i < 3; i++) if (A[1][i] < B[0][i] - 1e-6 || B[1][i] < A[0][i] - 1e-6) return false; return true; }
 function applyOp(st, f, tool, op) {
   (st.tools[f.id] ||= []).push({ shape: tool, op });
   if (op === "add") st.main = st.main ? st.main.fuse(tool) : tool;
   else {
-    if (!st.main) throw new Error("Aucun corps à enlever");
-    st.main = st.main.cut(tool);
+    // l'enlèvement agit sur le corps principal ET sur les profilés / pièces qu'il traverse
+    let done = false;
+    if (st.main && boxesOverlap(st.main, tool)) { st.main = st.main.cut(tool); done = true; }
+    for (const b of st.bodies) if (boxesOverlap(b.shape, tool)) { try { b.shape = b.shape.cut(tool); done = true; } catch { } }
+    if (!done) throw new Error(st.main || st.bodies.length ? "L'enlèvement ne touche aucun corps (vérifiez la direction / la profondeur)" : "Aucun corps à enlever");
   }
 }
+const hasBody = st => !!(st.main || st.bodies.length);
+// toutes les formes (corps principal + profilés + pièces) avec leur emplacement
+function allTargets(st) { const t = []; if (st.main) t.push({ get: () => st.main, set: v => st.main = v }); for (const b of st.bodies) t.push({ get: () => b.shape, set: v => b.shape = v }); return t; }
 
 function sketchOf(st, id) {
   const sk = st.sketches[id];
@@ -77,7 +114,7 @@ function sketchOf(st, id) {
 }
 function regionOf(sk) {
   const r = sketchRegions(sk.entities);
-  if (!r.drawing) throw new Error("L'esquisse ne contient aucun contour fermé");
+  if (!r.drawing) throw new Error("L'esquisse ne contient aucun contour fermé. Pour des lignes ouvertes : cochez « Fonction mince », ou utilisez Tôle pliée / Mécano-soudé.");
   return r.drawing;
 }
 
@@ -427,13 +464,23 @@ function applyFeature0(f, st, ev, doc) {
       break;
     }
     case "fillet": case "chamfer": {
-      if (!st.main) throw new Error("Aucun corps");
-      const edges = (f.edges || []).map(r => findEdge(st.main, r.p)).filter(Boolean);
-      if (!edges.length) throw new Error("Aucune arête sélectionnée");
+      if (!hasBody(st)) throw new Error("Aucun corps");
+      if (!(f.edges || []).length) throw new Error("Aucune arête sélectionnée");
       const v = ev(f.type === "fillet" ? f.radius : f.dist);
-      const res = f.type === "fillet" ? st.main.fillet(v, e => e.inList(edges)) : st.main.chamfer(v, e => e.inList(edges));
-      if (!res) throw new Error("Opération impossible");
-      st.main = res;
+      // répartir les arêtes par corps (corps principal ou profilé)
+      const targets = allTargets(st); const per = new Map();
+      for (const r of f.edges) {
+        let best = null, bd = Infinity, bt = null;
+        for (const t of targets) { const e = findEdge(t.get(), r); if (e) { const d = R.measureDistanceBetween(e, R.makeVertex(r.p)); if (d < bd) { bd = d; best = e; bt = t; } } }
+        if (best) { if (!per.has(bt)) per.set(bt, []); per.get(bt).push(best); }
+      }
+      if (!per.size) throw new Error("Arêtes introuvables (la pièce a trop changé) : éditez la fonction et resélectionnez-les");
+      for (const [t, edges] of per) {
+        const sh = t.get();
+        const res = f.type === "fillet" ? sh.fillet(v, e => e.inList(edges)) : sh.chamfer(v, e => e.inList(edges));
+        if (!res || !isValidShape(res)) throw new Error(GEOM_HINT[f.type]);
+        t.set(res);
+      }
       break;
     }
     case "shell": {
@@ -451,7 +498,7 @@ function applyFeature0(f, st, ev, doc) {
       break;
     }
     case "hole": {
-      if (!st.main) throw new Error("Aucun corps");
+      if (!hasBody(st)) throw new Error("Aucun corps");
       let pts = f.points || [], hn = f.face?.n;
       if (f.ptsSketch) {
         const ps = sketchOf(st, f.ptsSketch);
@@ -562,6 +609,10 @@ function applyFeature0(f, st, ev, doc) {
       if (f.target === "weld") {
         const src = st.bodies.filter(b => b.kind === "weld"); if (!src.length) throw new Error("Aucun élément mécano-soudé");
         for (const b of src) { if (f.copy) { let cur = b.shape; for (let i = 0; i < n; i++) { cur = tf(cur); st.bodies.push({ ...b, shape: cur, feature: f.id }); } } else b.shape = tf(b.shape); }
+        if (f.copy) { // les copies comptent dans la liste de débit
+          const items = Object.entries(st.info).filter(([id, v]) => Array.isArray(v) && v.length && v[0].profile && id !== f.id).flatMap(([, v]) => v);
+          st.info[f.id] = Array.from({ length: n }, () => items.map(x => ({ ...x }))).flat();
+        }
       } else {
         if (!st.main) throw new Error("Aucun corps");
         if (f.copy) { let cur = st.main, acc = st.main; for (let i = 0; i < n; i++) { cur = tf(cur); acc = acc.fuse(cur); } st.main = acc; }

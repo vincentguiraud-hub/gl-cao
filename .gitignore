@@ -4,3 +4,4 @@ public/occt-wasm.js
 desktop/node_modules/
 desktop/dist/
 desktop/app/
+.demande/

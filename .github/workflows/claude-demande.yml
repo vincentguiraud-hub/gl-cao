@@ -1,0 +1,94 @@
+name: Claude – demande depuis l'application
+# Une demande envoyée depuis le panneau « Claude » de l'application crée une issue « [Claude] … ».
+# Claude lit la demande, modifie le code, vérifie (compilation + tests), publie une nouvelle version
+# et répond dans l'issue. Seul le propriétaire du dépôt peut déclencher ce workflow.
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  actions: read
+  pages: write
+concurrency: { group: claude-modifs, cancel-in-progress: false }
+jobs:
+  claude:
+    if: startsWith(github.event.issue.title, '[Claude]') && github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      published: ${{ steps.check.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - name: Récupérer les pièces jointes (capture, pièce)
+        env:
+          CORPS: ${{ github.event.issue.body }}
+        run: |
+          mkdir -p .demande
+          git fetch origin demandes --depth=1 2>/dev/null || true
+          DIR=$(printf '%s' "$CORPS" | grep -o 'demandes/[A-Za-z0-9_-]*' | head -1 || true)
+          if [ -n "$DIR" ] && git rev-parse -q --verify origin/demandes >/dev/null; then
+            git --work-tree=.demande checkout origin/demandes -- "$DIR" 2>/dev/null || true
+            git reset -q
+          fi
+          find .demande -type f | head -20
+          git config user.name "Claude (G&L CAO)"
+          git config user.email "claude@users.noreply.github.com"
+          echo "VERSION_AVANT=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          claude_args: >-
+            --max-turns 120
+            --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,LS,Bash(npm:*),Bash(node:*),Bash(npx:*),Bash(git:*),Bash(gh:*),Bash(ls:*),Bash(cat:*),Bash(grep:*),Bash(find:*),Bash(sed:*),Bash(head:*),Bash(tail:*),Bash(mkdir:*),Bash(cp:*),Bash(mv:*),Bash(rm:*)"
+          prompt: |
+            Tu es le développeur de G&L CAO 3D (lis d'abord CLAUDE.md à la racine : architecture, règles, tests).
+            Vincent (le propriétaire, artisan métallier, s'exprime en français, pas développeur) a envoyé cette demande depuis l'application :
+
+            ---
+            Titre : ${{ github.event.issue.title }}
+            Numéro de demande : #${{ github.event.issue.number }}
+
+            ${{ github.event.issue.body }}
+            ---
+
+            Les pièces jointes éventuelles (capture d'écran capture.png, pièce en cours piece.glcad.json) sont dans le dossier .demande/ : regarde la capture avec l'outil Read et ouvre la pièce si elle aide à reproduire le problème.
+
+            Ce que tu dois faire, sans poser de question (Vincent ne répondra pas) :
+            1. Comprendre le problème ou la fonction demandée. Si la demande est ambiguë, choisis l'interprétation la plus utile pour un métallier et dis-le dans ta réponse.
+            2. Reproduire si possible (tests Node dans tests/, ou lecture du code), puis modifier le code de façon minimale et propre.
+            3. Ajouter ou adapter un test dans tests/ quand c'est pertinent.
+            4. Vérifier : `npm run build`, `node tests/engine.mjs`, `node tests/solver.mjs`, `node tests/dxf.mjs` doivent réussir (aucune ligne « ERR », « échecs : 0 »). Corrige jusqu'à ce que tout passe. Ne publie JAMAIS une version qui ne compile pas ou dont un test échoue.
+            5. Augmente la version dans package.json (patch : x.y.Z+1 ; minor si nouvelle fonction importante) et ajoute en tête de CHANGELOG.md une entrée datée en français simple.
+            6. Commit sur main avec le message « vX.Y.Z : résumé (#${{ github.event.issue.number }}) » puis `git push origin main`. Ne touche pas au dossier .demande/ (ne le committe pas) ni à .github/.
+            7. Réponds dans l'issue avec `gh issue comment ${{ github.event.issue.number }} --body "..."` : en français simple, ce qui a été modifié et comment l'utiliser (étapes numérotées), puis ferme l'issue avec `gh issue close ${{ github.event.issue.number }}`.
+            Si tu ne peux vraiment pas faire la modification en sécurité, ne pousse rien : explique pourquoi dans un commentaire et laisse l'issue ouverte.
+      - id: check
+        name: Nouvelle version publiée ?
+        run: |
+          git fetch origin main -q
+          V=$(git show origin/main:package.json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).version))")
+          echo "version=$V"
+          if [ "$V" != "$VERSION_AVANT" ]; then echo "published=true" >> $GITHUB_OUTPUT; else echo "published=false" >> $GITHUB_OUTPUT; fi
+      - name: En cas d'échec, prévenir dans l'issue
+        if: failure()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh issue comment ${{ github.event.issue.number }} --body "⚠️ La modification automatique n'a pas abouti (erreur technique). Rien n'a été publié, l'application est inchangée. Réessayez ou reformulez la demande."
+  publier:
+    needs: claude
+    if: needs.claude.outputs.published == 'true'
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

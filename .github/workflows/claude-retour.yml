@@ -1,0 +1,51 @@
+name: Retour à une version précédente
+# Déclenché par une issue « [Retour] précédente » ou « [Retour] v1.5.2 » créée depuis l'application.
+# Le code de la version demandée est restauré dans une NOUVELLE version (l'historique est conservé :
+# on peut toujours revenir en avant).
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+  pages: write
+  id-token: write
+concurrency: { group: claude-modifs, cancel-in-progress: false }
+jobs:
+  retour:
+    if: startsWith(github.event.issue.title, '[Retour]') && github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.r.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITRE: ${{ github.event.issue.title }}
+        run: |
+          set -e
+          git config user.name "Claude (G&L CAO)"; git config user.email "claude@users.noreply.github.com"
+          RES=$(node scripts/retour-version.mjs "$TITRE" ${{ github.event.issue.number }})
+          echo "$RES"
+          if [ "$RES" = "INTROUVABLE" ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "Version introuvable : rien n'a été modifié."
+            gh issue close ${{ github.event.issue.number }}
+            echo "published=false" >> $GITHUB_OUTPUT; exit 0
+          fi
+          CIBLE=$(echo "$RES" | awk '{print $2}'); NV=$(echo "$RES" | awk '{print $3}')
+          git push origin main
+          gh issue comment ${{ github.event.issue.number }} --body "✅ L'application est revenue au contenu de la version **$CIBLE** (publiée sous le numéro $NV). Fermez puis relancez G&L CAO 3D dans 2 minutes. Les versions plus récentes restent dans l'historique : vous pouvez y revenir de la même façon."
+          gh issue close ${{ github.event.issue.number }}
+          echo "published=true" >> $GITHUB_OUTPUT
+  publier:
+    needs: retour
+    if: needs.retour.outputs.published == 'true'
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

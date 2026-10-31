@@ -10,6 +10,7 @@ import { STD_PLANES, makeEval, v3, v2, planeFromNormal, planeY, to3D, to2D, circ
 import { PROFILE_FAMILIES, profileName } from "./profiles.js";
 import { icon } from "./icons.js";
 import { REL_LABELS } from "./solver.js";
+import { openAssistant, watchRequests } from "./assistant.js";
 import { saveFile, saveZipped, sketchToDXF, flatPatternDXF, warmDownloads, toOBJ, toSTLAscii, toPLY, to3MF, svgDrawingToDXF, faceToDXF } from "./exporters.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { buildDrawing, SCALES, scaleLabel } from "./drawing.js";
@@ -1395,6 +1396,13 @@ async function main() {
   $("#bExport").innerHTML = icon("export", 18) + '<span class="lbl">Exporter</span>';
   $("#bUndo").innerHTML = icon("undo", 18); $("#bRedo").innerHTML = icon("redo", 18);
   $("#bHelp").innerHTML = icon("help", 18) + '<span class="lbl">Aide</span>';
+  $("#bClaude").innerHTML = '<span style="display:inline-grid;place-items:center;width:20px;height:20px;border-radius:5px;background:#d97757;color:#fff;font-weight:800;font-size:12px">C</span><span class="lbl">Claude</span>';
+  $("#bClaude").onclick = () => {
+    if (!/^https?:/.test(location.protocol) && !/^glcao:/.test(location.protocol)) return toast("Indisponible ici", true);
+    window.__glConfirm = q => { try { return window.confirm(q); } catch { return true; } };
+    openAssistant({ modal, toast, esc, version: APP_VERSION, getProject: () => JSON.stringify(doc), getScreenshot: () => { try { return viewer.screenshot(); } catch { return null; } } });
+  };
+  watchRequests({ toast, onDone: it => { toast("Claude a terminé : " + it.title.replace(/^\[(Claude|Retour)\]\s*/, "") + " – mise à jour dans un instant"); setTimeout(() => checkUpdate(true), 90000); } });
   $("#confirm .ok").innerHTML = icon("exit", 26); $("#confirm .no").innerHTML = icon("close", 24);
   $("#bNew").onclick = e => newMenu(e.clientX, e.clientY + 10);
   $("#bOpen").onclick = () => pickFile(".json,.glcad,.step,.stp,.stl", f => /\.(json|glcad)$/i.test(f.name) && doc.features.length ? confirmReplace(() => openFile(f)) : openFile(f));
